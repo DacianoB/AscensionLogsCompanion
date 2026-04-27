@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.1.6"
+C.VERSION = "0.1.7"
 C.SCHEMA_VERSION = 2
 
 -- Addon channel
