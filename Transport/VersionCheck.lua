@@ -70,6 +70,11 @@ local function noticeFilter(self, event, arg1, arg2, arg3, arg4, arg5, arg6, arg
     return false
 end
 
+-- Forward declaration so doJoin can fire a broadcast immediately after
+-- joining the channel (broadcast itself is defined later because it uses
+-- safeSend / channelId).
+local broadcast
+
 -- Move our channel slot to the bottom of /chatlist so ALCSync isn't the
 -- first thing players see. Bounded by WoW's 10-channel cap.
 local function pushChannelDown()
@@ -165,7 +170,7 @@ local function safeSend(prefix, payload, kind, target)
     pcall(SendAddonMessage, prefix, payload, kind, target)
 end
 
-local function broadcast(force)
+broadcast = function(force)
     if V.localVersion <= 0 then return end
     local now = GetTime()
     if not force and (now - lastBroadcastTs) < BROADCAST_THROTTLE_S then return end
