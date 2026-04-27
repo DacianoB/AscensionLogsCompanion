@@ -1,6 +1,16 @@
 -- Capture/GearScan.lua
 -- Reads equipped gear for a unit. Works for "player" and inspected units.
 -- Post-inspect 200ms gear populate delay is handled by the caller (InspectLoop).
+--
+-- Vanity capture (2026-04-26): on Ascension, GetInventoryItemLink returns the
+-- REAL underlying item, while GetInventoryItemID returns the VISIBLE vanity /
+-- transmog appearance (when one is applied). Verified on Barry:
+--   link=216939 = "Dragonstalker's Helm"   (real item Barry actually wears)
+--   id  =941102 = "Jewel of the Firelord"  (vanity overlay on character model)
+--
+-- We capture item_id from the link (real) and ALSO capture vanity_item_id
+-- from GetInventoryItemID when it differs, so the report can show both sides
+-- and we can validate this assumption across many real captures.
 
 local ALC = _G.ALC
 local G = {}
@@ -49,7 +59,7 @@ function G.readGear(unit)
         if link then
             local parsed = G.parseItemString(link)
             if parsed then
-                gear[#gear + 1] = {
+                local entry = {
                     slot = slot,
                     item_id = parsed.item_id,
                     enchant = parsed.enchant,
@@ -58,6 +68,32 @@ function G.readGear(unit)
                     unique = parsed.unique,
                     raw = parsed.raw,
                 }
+                -- Vanity overlay: when GetInventoryItemID differs from the
+                -- link's item_id, the player has a transmog applied. Record
+                -- the appearance ID so the report can render both. Most
+                -- slots will not diverge.
+                if GetInventoryItemID then
+                    local appearanceId = GetInventoryItemID(unit, slot)
+                    if appearanceId and appearanceId ~= parsed.item_id then
+                        entry.vanity_item_id = appearanceId
+                    end
+                end
+                -- Vanity-detection flag: independent of divergence, check
+                -- whether the captured item_id itself is registered in
+                -- Ascension's vanity collection. When both link and
+                -- GetInventoryItemID return the same vanity ID (the
+                -- "fully-poisoned" peer state), divergence is invisible
+                -- but C_VanityCollection.GetItem still recognizes it.
+                -- Backend can flag is_vanity=true slots as suspect.
+                if _G.C_VanityCollection
+                   and type(C_VanityCollection.GetItem) == "function"
+                   and parsed.item_id and parsed.item_id > 0 then
+                    local ok, rec = pcall(C_VanityCollection.GetItem, parsed.item_id)
+                    if ok and rec then
+                        entry.is_vanity = true
+                    end
+                end
+                gear[#gear + 1] = entry
             end
         end
     end

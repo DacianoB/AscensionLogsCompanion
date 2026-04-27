@@ -84,6 +84,38 @@ B.BY_ZONE["Wailing Caverns"] = {
     "Skum",                    -- rare turtle
     "Mutanus the Devourer",
 }
+-- Maraudon (5-man, Desolace). Vanilla 1.12 lineup.
+B.BY_ZONE["Maraudon"] = {
+    "Noxxion",
+    "Razorlash",
+    "Lord Vyletongue",
+    "Celebras the Cursed",
+    "Landslide",
+    "Tinkerer Gizlock",
+    "Rotgrip",
+    "Princess Theradras",
+}
+
+-- Scholomance (5-man, EPL). Vanilla 1.12 lineup. Verify exact names in
+-- runtime via /alc boss add if any are off (e.g. some servers spell
+-- "Doctor Theolen Krastinov" without the title).
+B.BY_ZONE["Scholomance"] = {
+    "Kirtonos the Herald",
+    "Jandice Barov",
+    "Rattlegore",
+    "Death Knight Darkreaver",
+    "Marduk Blackpool",
+    "Vectus",
+    "Lady Illucia Barov",
+    "Lord Alexei Barov",
+    "The Ravenian",
+    "Lorekeeper Polkelt",
+    "Ras Frostwhisper",
+    "Kormok",
+    "Instructor Malicia",
+    "Doctor Theolen Krastinov",
+    "Darkmaster Gandling",
+}
 B.BY_ZONE["World Bosses"] = {
     "Atal'zul, the Soulreaver",
     "Azuregos",

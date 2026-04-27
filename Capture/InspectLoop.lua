@@ -184,6 +184,24 @@ local function finalizeInspect()
         if secondCount > (infl.firstSlotCount or 0) then
             ci.gear = ALC.Capture.GearScan.readGear(unit)
         end
+        -- Vanity re-scan: GetInventoryItemID for inspected units may take
+        -- longer to populate than GetInventoryItemLink. The first readGear
+        -- in onInspectReady runs at INSPECT_TALENT_READY (~1.5s post-
+        -- NotifyInspect), but vanity overlays sometimes don't show until
+        -- 3s+. Finalize runs after CA + mystic events both land (or 3s
+        -- timeout), so by here the overlay data should be ready. Patch
+        -- vanity_item_id onto whatever entries diverge now.
+        if ci.gear and GetInventoryItemID then
+            for _, entry in ipairs(ci.gear) do
+                local slot = entry.slot
+                if slot then
+                    local appearanceId = GetInventoryItemID(unit, slot)
+                    if appearanceId and appearanceId ~= entry.item_id then
+                        entry.vanity_item_id = appearanceId
+                    end
+                end
+            end
+        end
         if ALC.Capture.MysticEnchantScan then
             ci.mystic_enchants = {
                 applied  = ALC.Capture.MysticEnchantScan.readInspectedEnchants(unit),
@@ -231,7 +249,69 @@ local function finalizeInspect()
             end
             -- 2nd attempt also incomplete -> accept; back to normal schedule
         end
+        -- Detect whether the captured gear actually changed since last
+        -- inspect. If retries produce byte-identical gear (same item_ids,
+        -- enchants, vanity overlays), don't bump last_success_at - that
+        -- would push a redundant CI through the hijack queue and into
+        -- combat logs, creating duplicate rows downstream. Only re-publish
+        -- when something meaningfully changed.
+        local prevLastSuccess = entry.last_success_at
+        local gearHash = ""
+        if ci and ci.gear then
+            local parts = {}
+            for _, e in ipairs(ci.gear) do
+                parts[#parts + 1] = tostring(e.item_id) .. ":"
+                    .. tostring(e.enchant or 0) .. ":"
+                    .. tostring(e.vanity_item_id or 0)
+            end
+            gearHash = table.concat(parts, "|")
+        end
+        local gearChanged = (entry.last_gear_hash ~= gearHash)
+
         scheduleNext(entry, outcome)
+
+        if not gearChanged and outcome == "success" then
+            -- Restore the previous last_success_at so publishPeerInspects's
+            -- per-(guid, ts) dedup skips this iteration. Schedule still
+            -- moves forward via next_scan_at.
+            entry.last_success_at = prevLastSuccess
+        end
+        entry.last_gear_hash = gearHash
+
+        -- Vanity-staleness retry: when GetInventoryItemLink and GetInventoryItemID
+        -- both return the same value (no divergence), we can't distinguish
+        -- "no transmog" from "API not yet ripened to expose the divergence."
+        -- The transient hybrid state where divergence appears is
+        -- non-deterministic, so retry every 1s up to 10 times within each
+        -- pull. Counter resets on new pull so each fight gets fresh tries.
+        -- The 1s interval is a soft scheduling hint; in practice a 5-man
+        -- with multiple peers retrying cycles each peer every (peers × 1s),
+        -- so per-peer effective interval is ~5s. 10 retries gives the API
+        -- ample chances to land in the divergence-detectable state without
+        -- consuming much bandwidth (still bounded by INSPECT_MIN_INTERVAL_S).
+        if outcome == "success" and ci and ci.gear then
+            local newPullId = tracker and tracker.getCurrentPullId() or 0
+            if entry.vanity_check_pull_id ~= newPullId then
+                entry.vanity_check_attempts = 0
+                entry.vanity_check_pull_id = newPullId
+            end
+
+            local divergedSlots = 0
+            for _, gearEntry in ipairs(ci.gear) do
+                if gearEntry.vanity_item_id then
+                    divergedSlots = divergedSlots + 1
+                end
+            end
+
+            if divergedSlots > 0 then
+                entry.vanity_check_attempts = nil
+                entry.vanity_check_pull_id = nil
+            elseif (entry.vanity_check_attempts or 0) < 10 then
+                entry.vanity_check_attempts = (entry.vanity_check_attempts or 0) + 1
+                entry.next_scan_at = time() + 1
+            end
+        end
+
         ALC.Capture.InspectCache.set(infl.guid, entry)
         local cycleTime = GetTime() - infl.startedAt
         ALC.Core.Logger.debug(string.format("Captured CI for %s [boss=%s, ca=%s me=%s, %.2fs] outcome=%s%s",
@@ -346,7 +426,13 @@ local function tick()
     ALC.Capture.InspectCache.set(nextGuid, entry)
 
     I.inFlight = { guid = nextGuid, startedAt = now() }
-    -- Stock 3.3.5 inspect for gear / talents / arena teams
+    -- Stock 3.3.5 inspect for talents / mystic / guild / race. Gear data
+    -- now comes from LibOpenRaid's LRS broadcasts (see PeerGearListener),
+    -- so we don't need the InspectUnit + SetAlpha(0) trick that was
+    -- attempting to ripen the inspect-frame-only vanity-overlay packets.
+    -- That trick was rough (occasional frame flashes, complexity) and
+    -- still didn't reliably surface divergence. Plain NotifyInspect is
+    -- enough for the lighter fields.
     NotifyInspect(unit)
     -- Ascension-specific: trigger CAO inspect packet
     if _G.C_CharacterAdvancement and type(_G.C_CharacterAdvancement.InspectUnit) == "function" then
@@ -357,6 +443,80 @@ local function tick()
         ALC.Capture.MysticEnchantScan.requestInspect(unit)
     end
     ALC.Core.Metrics.inc("inspect_sent")
+
+    -- Schedule a deferred vanity-overlay re-scan. Out-of-combat manual
+    -- inspects (e.g. inspecting in Orgrimmar) reliably surface divergence
+    -- because the user keeps the frame open 5-30s and the server has time
+    -- to send the full vanity-overlay packet sequence. In-combat auto-
+    -- inspects need a longer read window for the same packets to arrive
+    -- (server load + faster cycling). 8s is a compromise between giving
+    -- the API enough time to ripen and not delaying CI publishing too
+    -- much. If divergence appears we patch vanity_item_id on the cache
+    -- entry and re-publish so a fresh chunk hits the combat log.
+    local deferredGuid = nextGuid
+    local deferredFn = function()
+        if not UnitExists(unit) or UnitGUID(unit) ~= deferredGuid then return end
+        local cachedEntry = ALC.Capture.InspectCache.get(deferredGuid)
+        if not cachedEntry or not cachedEntry.ci or not cachedEntry.ci.gear then return end
+        if not GetInventoryItemID then return end
+
+        local newDiverges = 0
+        for _, gearEntry in ipairs(cachedEntry.ci.gear) do
+            local slot = gearEntry.slot
+            if slot then
+                local appearanceId = GetInventoryItemID(unit, slot)
+                if appearanceId and appearanceId ~= gearEntry.item_id
+                   and gearEntry.vanity_item_id ~= appearanceId then
+                    gearEntry.vanity_item_id = appearanceId
+                    newDiverges = newDiverges + 1
+                end
+            end
+        end
+
+        if newDiverges > 0 then
+            -- Bump last_success_at so SnapshotPipeline's per-(guid, ts) dedup
+            -- treats this as a fresh CI worth re-enqueueing. Also recompute
+            -- the gear hash so the next basic inspect doesn't see this
+            -- deferred patch as "new data" and double-publish.
+            cachedEntry.last_success_at = time()
+            cachedEntry.vanity_check_attempts = nil
+            local newHashParts = {}
+            for _, e in ipairs(cachedEntry.ci.gear) do
+                newHashParts[#newHashParts + 1] = tostring(e.item_id) .. ":"
+                    .. tostring(e.enchant or 0) .. ":"
+                    .. tostring(e.vanity_item_id or 0)
+            end
+            cachedEntry.last_gear_hash = table.concat(newHashParts, "|")
+            ALC.Capture.InspectCache.set(deferredGuid, cachedEntry)
+            if ALC.Capture.SnapshotPipeline and ALC.Capture.SnapshotPipeline.publishPeerInspects then
+                ALC.Capture.SnapshotPipeline.publishPeerInspects()
+            end
+            ALC.Core.Logger.debug(string.format(
+                "Deferred vanity-rescan patched %d slot(s) for %s and re-published.",
+                newDiverges, UnitName(unit) or deferredGuid))
+        end
+
+        -- Close the InspectFrame opened by InspectUnit() in tick(). We
+        -- SetAlpha(0)'d it to keep it invisible while events fired; now
+        -- that we've read what we need, hide it and restore alpha so the
+        -- user's next manual right-click→Inspect renders normally.
+        if _G.InspectFrame then
+            pcall(InspectFrame.Hide, InspectFrame)
+            pcall(InspectFrame.SetAlpha, InspectFrame, 1)
+        end
+    end
+
+    if _G.C_Timer and C_Timer.After then
+        C_Timer.After(8.0, deferredFn)
+    else
+        local tf = CreateFrame("Frame")
+        local startedAt = GetTime()
+        tf:SetScript("OnUpdate", function(self, el)
+            if GetTime() - startedAt >= 8.0 then
+                self:SetScript("OnUpdate", nil); deferredFn()
+            end
+        end)
+    end
 end
 
 function I.onRosterChange()

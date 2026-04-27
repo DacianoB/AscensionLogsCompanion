@@ -2,9 +2,9 @@
 ## Title: |cff4ec3ffAscension Logs|r |cffe8e8e8Companion|r
 ## Notes: Inspects gear, talents, and mystic enchants per encounter for ascensionlogs.gg. Auto-inspects the raid in the background.
 ## Author: FangYuanWoW
-## Version: 0.1.1
+## Version: 0.1.6
 ## SavedVariables: ALC_Config, ALC_Peers
-## SavedVariablesPerCharacter: ALC_LocalState, ALC_SessionLog, ALC_InspectCache
+## SavedVariablesPerCharacter: ALC_LocalState, ALC_SessionLog, ALC_InspectCache, ALC_InspectCacheMeta
 ## OptionalDeps: Ace3
 
 embeds.xml

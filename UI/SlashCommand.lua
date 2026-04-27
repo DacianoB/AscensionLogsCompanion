@@ -18,8 +18,10 @@ end
 local function printHelp()
     local L = ALC.Core.Logger
     L.info("|cff00ff00Ascension Logs Companion|r")
-    L.info("  |cffffd200/alc|r           open settings")
-    L.info("  |cffffd200/alc status|r    show current state")
+    L.info("  |cffffd200/alc|r              open panel")
+    L.info("  |cffffd200/alc settings|r     open panel on Settings tab")
+    L.info("  |cffffd200/alc zones|r        open panel on Monitored Zones tab")
+    L.info("  |cffffd200/alc status|r       show current state")
 end
 
 SlashCmdList["ALC"] = function(msg)
@@ -30,6 +32,21 @@ SlashCmdList["ALC"] = function(msg)
 
     if cmd == "" or cmd == "gui" then
         ALC.UI.SettingsFrame.toggle()
+
+    elseif cmd == "settings" or cmd == "zones" then
+        -- Open the panel directly to a specific tab. /alc settings jumps to
+        -- the Settings tab; /alc zones jumps to Monitored Zones.
+        local f = ALC.UI.SettingsFrame.create and ALC.UI.SettingsFrame.create() or nil
+        if ALC.UI.SettingsFrame.openTab then
+            ALC.UI.SettingsFrame.openTab(cmd == "settings" and "settings" or "zones")
+        end
+        if ALC.UI.SettingsFrame.refreshCheckboxes then
+            ALC.UI.SettingsFrame.refreshCheckboxes()
+        end
+        if ALC.UI.SettingsFrame.refreshZones then
+            ALC.UI.SettingsFrame.refreshZones()
+        end
+        if f and not f:IsShown() then f:Show() end
 
     elseif cmd == "status" then
         local cfg = _G.ALC_Config or {}

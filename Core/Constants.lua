@@ -7,8 +7,8 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.1.0"
-C.SCHEMA_VERSION = 1
+C.VERSION = "0.1.6"
+C.SCHEMA_VERSION = 2
 
 -- Addon channel
 C.ADDON_PREFIX = "ALC"
@@ -61,4 +61,5 @@ C.DEFAULT_CONFIG = {
     hijack_enabled = true,
     is_logger = true,
     silent_auto_logging = false,  -- skip both start + stop popups; logging stays on across zone changes until user manually toggles
+    log_dungeons = true,          -- when off, auto-/combatlog only fires for raids (instanceType=="raid"), skipping 5-man dungeons
 }

@@ -7,8 +7,36 @@ local IC = {}
 ALC.Capture.InspectCache = IC
 
 -- Rehydrate from SavedVariables on ADDON_LOADED.
+--
+-- Schema-version guard: when the addon upgrades and the captured-CI shape
+-- changes (new fields, semantic shifts), persisted entries from the older
+-- version may carry data that's misleading at best and corrupt at worst.
+-- Wokesniff/Bonescythe in report 1365 was an example: pre-vanity-overlay
+-- captures stored the visible vanity item ID in `item_id` because the addon
+-- couldn't yet distinguish real from vanity. Letting those entries linger
+-- after upgrade would mean another 5min of bad data per peer until the
+-- normal rescan cadence caught up. The version guard wipes the cache on
+-- upgrade so every peer gets re-inspected fresh under the new code.
 function IC.rehydrate()
     _G.ALC_InspectCache = _G.ALC_InspectCache or {}
+    _G.ALC_InspectCacheMeta = _G.ALC_InspectCacheMeta or {}
+
+    local C = ALC.Core.Constants
+    local cachedVersion = _G.ALC_InspectCacheMeta.schema_version
+
+    if cachedVersion ~= C.SCHEMA_VERSION then
+        local count = 0
+        for _ in pairs(_G.ALC_InspectCache) do count = count + 1 end
+        if count > 0 then
+            ALC.Core.Logger.info(string.format(
+                "Inspect cache schema bumped (%s -> %d). Cleared %d stale entries; peers will be re-inspected fresh.",
+                tostring(cachedVersion or "<none>"), C.SCHEMA_VERSION, count))
+        end
+        _G.ALC_InspectCache = {}
+        _G.ALC_InspectCacheMeta.schema_version = C.SCHEMA_VERSION
+        return
+    end
+
     -- Validate entries: drop anything with missing fields or older than 7 days
     local nowSec = time()
     local cutoff = nowSec - (7 * 24 * 3600)

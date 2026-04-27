@@ -55,12 +55,16 @@ StaticPopupDialogs["ALC_COMBATLOG_STOP_PROMPT"] = {
 }
 
 -- Popup shown when ALC starts /combatlog on entering a monitored zone.
--- Two buttons: OK (keep logging) / "Do Not Log" (stop). Settings access is
--- via /alc or the minimap button - keeping the popup minimal.
+-- Buttons: OK (keep logging), Do Not Log (stop), and conditionally
+-- Hide Transmog (opt-in cleaner-captures action when transmog viewing
+-- is currently on). The third button + warning text is added at show
+-- time only when C_Appearance.CanSeeAppearances() is true; otherwise
+-- the popup stays compact.
 StaticPopupDialogs["ALC_COMBATLOG_STARTED"] = {
     text = "",  -- set dynamically per zone
     button1 = "OK",
     button2 = "Do Not Log",
+    button3 = nil,  -- set dynamically when transmog viewing is on
     OnAccept = function()
         -- User wants to keep logging; nothing to do, addon already started it
     end,
@@ -74,6 +78,43 @@ StaticPopupDialogs["ALC_COMBATLOG_STARTED"] = {
         end
         Z.startedByUs = false
         Z.lastLoggedZone = nil
+    end,
+    OnAlt = function()
+        -- Third button: hide transmog (preserves spell-visuals state) and
+        -- keep logging. Captures from this point onward are clean.
+        if _G.C_Appearance and type(C_Appearance.CanSeeAppearances) == "function"
+           and type(C_Appearance.SetCanSeeAppearances) == "function" then
+            local ok, _, spellVisuals = pcall(C_Appearance.CanSeeAppearances)
+            if ok then
+                pcall(C_Appearance.SetCanSeeAppearances, false, spellVisuals)
+                if ALC.Core.Logger then
+                    ALC.Core.Logger.info("Transmog viewing disabled. Captures will use real gear.")
+                end
+                -- Defer the panel refresh - CanSeeAppearances reads the
+                -- live setting state, which doesn't update synchronously
+                -- after SetCanSeeAppearances. A 0.1s delay is enough for
+                -- the next frame's read to return the new value.
+                local doRefresh = function()
+                    if ALC.UI and ALC.UI.SettingsFrame and ALC.UI.SettingsFrame.refreshCheckboxes then
+                        ALC.UI.SettingsFrame.refreshCheckboxes()
+                    end
+                end
+                if _G.C_Timer and C_Timer.After then
+                    C_Timer.After(0.1, doRefresh)
+                else
+                    -- Fallback: OnUpdate one-shot
+                    local f = CreateFrame("Frame")
+                    local started = GetTime()
+                    f:SetScript("OnUpdate", function(self, el)
+                        if GetTime() - started >= 0.1 then
+                            self:SetScript("OnUpdate", nil)
+                            doRefresh()
+                        end
+                    end)
+                end
+            end
+        end
+        -- Logging continues - we don't stop it, popup just closes.
     end,
     timeout = 0,
     whileDead = true,
@@ -114,6 +155,16 @@ local function startLogging(zoneName, showPopup)
     end
     if not ALC_Config.auto_combatlog_on_raid then return end
 
+    -- Dungeon gate: when log_dungeons is off, only raid instances trigger
+    -- auto-logging. 5-man dungeons (instanceType="party") are skipped.
+    -- World-boss subzones aren't instanced (IsInInstance returns "none")
+    -- so they continue to trigger as long as the zone is in the list.
+    local _, instanceType = IsInInstance()
+    if instanceType == "party" and not ALC_Config.log_dungeons then
+        ALC.Core.Logger.debug("Skipping auto-/combatlog: " .. zoneName .. " is a 5-man and 'Log dungeons' is off")
+        return
+    end
+
     -- Activate /combatlog
     SlashCmdList["COMBATLOG"]("")
     Z.lastLoggedZone = zoneName
@@ -124,12 +175,35 @@ local function startLogging(zoneName, showPopup)
     -- per zone entry (don't re-spam if user crosses subzones inside).
     if showPopup and Z.popupShownForZone ~= zoneName then
         Z.popupShownForZone = zoneName
-        StaticPopupDialogs["ALC_COMBATLOG_STARTED"].text =
+        local popup = StaticPopupDialogs["ALC_COMBATLOG_STARTED"]
+
+        -- Detect whether the user currently has other-player transmog
+        -- visible. If on, surface a warning + opt-in third button so
+        -- they can hide transmog right here for cleaner captures
+        -- without having to open /alc settings mid-pull.
+        local transmogOn = false
+        if _G.C_Appearance and type(C_Appearance.CanSeeAppearances) == "function" then
+            local ok, t = pcall(C_Appearance.CanSeeAppearances)
+            transmogOn = ok and t and true or false
+        end
+
+        local baseText =
             "|TInterface\\AddOns\\AscensionLogsCompanion\\Media\\logo-128.tga:32:32:0:0|t  |cff4ec3ffAscension Logs|r |cffe8e8e8Companion|r\n" ..
             "|cff555555------------------------------|r\n" ..
             "Starting |cffffd200/combatlog|r for:\n" ..
             "|cff00ffff" .. zoneName .. "|r\n\n" ..
             "Output: |cffaaaaaaLogs\\WoWCombatLog.txt|r"
+
+        if transmogOn then
+            popup.text = baseText
+                .. "\n\n|cffff8800Transmog viewing is ON.|r Captured gear may show vanity items in place of real gear. ALC retries to detect the real items, but it isn't always accurate.\n\n"
+                .. "|cffaaaaaaClick |r|cffffd200Hide Transmog|r|cffaaaaaa to disable for cleaner captures. Re-enable any time via |r|cffffd200/alc|r|cffaaaaaa settings or the wardrobe pane's Disable/Enable Transmog button.|r"
+            popup.button3 = "Hide Transmog"
+        else
+            popup.text = baseText
+            popup.button3 = nil
+        end
+
         StaticPopup_Show("ALC_COMBATLOG_STARTED")
     end
 end

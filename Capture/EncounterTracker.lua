@@ -71,6 +71,10 @@ end
 
 local function checkUnit(unit)
     if not unit or not UnitExists(unit) then return end
+    -- Combat gate: don't pin a boss from a stray target/mouseover before
+    -- the pull starts. Targeting the boss while running up shouldn't tag
+    -- still-trash captures with the boss name. Wait for actual combat.
+    if not UnitAffectingCombat("player") then return end
     local name = UnitName(unit)
     local boss = ALC.Zone.BossRegistry.match(name)
     if boss then
@@ -80,12 +84,50 @@ local function checkUnit(unit)
     end
 end
 
+-- During combat, also detect the boss via combat-log events. Combat-
+-- log gives us authoritative source/dest name+GUID for every action,
+-- which catches bosses we never target/mouseover and provides a
+-- reliable GUID to clear on death.
+local function checkCombatEvent(sourceGUID, sourceName, destGUID, destName)
+    if E.currentBoss then return end  -- already pinned, fast path
+    if not UnitAffectingCombat("player") then return end
+    -- Try source first (most events have a non-player source we care about)
+    if sourceName then
+        local boss = ALC.Zone.BossRegistry.match(sourceName)
+        if boss then
+            setCurrentBoss(boss)
+            E.currentBossGuid = sourceGUID
+            E.lastActivityAt = time()
+            return
+        end
+    end
+    if destName then
+        local boss = ALC.Zone.BossRegistry.match(destName)
+        if boss then
+            setCurrentBoss(boss)
+            E.currentBossGuid = destGUID
+            E.lastActivityAt = time()
+        end
+    end
+end
+
 -- Deterministic boss clear on death. The 30s settle window is too coarse:
 -- trash pulled within seconds of a kill stays tagged with the dead boss,
--- which contaminates captured_for_boss on any inspect CIs published in that
--- gap. UNIT_DIED on the matching destGUID is the unambiguous signal.
-local function onUnitDied(destGuid)
+-- which contaminates captured_for_boss on any inspect CIs published in
+-- that gap. UNIT_DIED on the matching destGUID OR matching destName is
+-- the unambiguous signal. Name-match is the fallback for cases where we
+-- never targeted the boss and currentBossGuid stayed nil.
+local function onUnitDied(destGuid, destName)
+    local match = false
     if E.currentBossGuid and destGuid == E.currentBossGuid then
+        match = true
+    elseif E.currentBoss and destName then
+        local mapped = ALC.Zone.BossRegistry.match(destName)
+        if mapped == E.currentBoss then
+            match = true
+        end
+    end
+    if match then
         ALC.Core.Logger.debug("Boss " .. tostring(E.currentBoss) .. " died - clearing")
         E.currentBoss = nil
         E.currentBossGuid = nil
@@ -137,9 +179,19 @@ function E.start()
     ALC.RegisterEvent("PLAYER_REGEN_ENABLED", onRegenEnabled)
     ALC.RegisterEvent("PLAYER_REGEN_DISABLED", onRegenDisabled)
     ALC.RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED", function(event, ...)
-        local _, subEvent, _, _, _, destGUID = ...
+        -- 3.3.5 combat log signature:
+        -- (timestamp, subEvent, sourceGUID, sourceName, sourceFlags,
+        --  destGUID, destName, destFlags, ...)
+        local _, subEvent, sourceGUID, sourceName, _, destGUID, destName = ...
         if subEvent == "UNIT_DIED" then
-            onUnitDied(destGUID)
+            onUnitDied(destGUID, destName)
+            return
+        end
+        -- Use combat-log activity to detect the current boss when we
+        -- never target/mouseover them. Cheap fast-path: if currentBoss
+        -- is already pinned, skip everything.
+        if not E.currentBoss then
+            checkCombatEvent(sourceGUID, sourceName, destGUID, destName)
         end
     end)
 
