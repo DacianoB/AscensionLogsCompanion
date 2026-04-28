@@ -113,18 +113,35 @@ function P.publishOwnIfChanged()
     ALC.Core.Logger.debug("Own CI enqueued: " .. #chunks .. " chunks (serializer=" .. ALC.Core.Serialize.activePath() .. ", hash " .. hash .. ")")
 end
 
--- Enqueue peer CIs from the inspect cache. Only chunks for entries we
--- haven't already enqueued in this session.
+-- Enqueue peer CIs from the inspect cache. Dedup is per-pull, so each new
+-- combat-log window gets a fresh broadcast of every cached peer. Without
+-- pullId in the dedup key, peers with stable gear were broadcast exactly
+-- once per session, producing 2-of-18 coverage on rapid wipe-retry pulls.
 function P.publishPeerInspects()
     if not shouldPublish() then return end
     local cache = ALC.Capture.InspectCache.snapshot()
     P.lastPeerEnqueued = P.lastPeerEnqueued or {}
+
+    local tracker = ALC.Capture.EncounterTracker
+    local currentBoss   = tracker and tracker.getCurrentBoss() or nil
+    local currentPullId = tracker and tracker.getCurrentPullId() or 0
+
     local count = 0
     for guid, entry in pairs(cache) do
         if entry.ci and entry.last_success_at then
             local key = guid .. ":" .. tostring(entry.last_success_at)
+                        .. ":" .. tostring(currentPullId)
             if P.lastPeerEnqueued[key] ~= true then
                 P.lastPeerEnqueued[key] = true
+                -- Re-stamp boss/pull context at broadcast time. The CI was
+                -- built when the inspect completed, which may have been
+                -- pre-pull (currentBoss = nil). At broadcast we have
+                -- authoritative tracker state, so the chunk's CI body
+                -- reflects the encounter it's being emitted into.
+                if currentBoss then
+                    entry.ci.captured_for_boss    = currentBoss
+                    entry.ci.captured_for_pull_id = currentPullId
+                end
                 local chunks = serializeCIToChunks(entry.ci)
                 if chunks then
                     for _, chunk in ipairs(chunks) do
@@ -136,7 +153,8 @@ function P.publishPeerInspects()
         end
     end
     if count > 0 then
-        ALC.Core.Logger.debug("Peer CIs enqueued: " .. count .. " chunks total")
+        ALC.Core.Logger.debug("Peer CIs enqueued: " .. count
+            .. " chunks total (pullId=" .. tostring(currentPullId) .. ")")
     end
 end
 
@@ -179,6 +197,16 @@ function P.start()
     ALC.RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED", P.publishOwnIfChanged)
     ALC.RegisterEvent("PLAYER_REGEN_DISABLED", function()
         ALC.Core.Logger.debug("Pipeline got PLAYER_REGEN_DISABLED")
+        -- New pull starts: clear any chunks left over from the prior pull's
+        -- queue (would otherwise emit late and mis-attribute to this pull's
+        -- combat-log window in the backend's timestamp-based dispatcher),
+        -- and clear the per-broadcast dedup so every cached peer re-emits
+        -- with fresh pull metadata. publishAll re-enqueues everything.
+        if ALC.Transport.SpellFailedHijack
+           and ALC.Transport.SpellFailedHijack.clearQueue then
+            ALC.Transport.SpellFailedHijack.clearQueue()
+        end
+        P.lastPeerEnqueued = {}
         P.publishAll()
     end)
     -- Periodic peer republish: 30s tick (best-effort; 3.3.5 may lack C_Timer)

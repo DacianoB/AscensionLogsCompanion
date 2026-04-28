@@ -80,6 +80,7 @@ function L.buildLocalCI(sessionId)
     local cao = CAO.readCAOForUnit("player") or {}
     local ci = {
         schema_version = C.SCHEMA_VERSION,
+        addon_version  = C.VERSION,
         session_id = sessionId,
         captured_at = time() * 1000,
         source = "local",
@@ -129,6 +130,7 @@ function L.buildInspectCI(unit, sessionId)
     local _, raceToken  = UnitRace(unit)
     return {
         schema_version = C.SCHEMA_VERSION,
+        addon_version  = C.VERSION,
         session_id = sessionId,
         captured_at = time() * 1000,
         source = "inspect",

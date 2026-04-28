@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.1.7"
+C.VERSION = "0.1.8"
 C.SCHEMA_VERSION = 2
 
 -- Addon channel
@@ -38,7 +38,7 @@ C.ADDON_MSG_JOIN_CAP_RATE    = 2    -- 2 msg/s during login storm window
 C.HELLO_JITTER_MAX_S         = 3.0
 
 -- Hijack queue
-C.HIJACK_QUEUE_MAX_CHUNKS = 200
+C.HIJACK_QUEUE_MAX_CHUNKS = 400
 C.HIJACK_CHUNK_TTL_S      = 600  -- 10 min
 
 -- Chunking
