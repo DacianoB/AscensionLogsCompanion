@@ -65,6 +65,22 @@ local function petInfo()
     return nil
 end
 
+-- Reads the logger's "show transmog on inspected players" client setting.
+-- Captured on the local CI so the backend can correlate logger preferences
+-- with capture quality (a logger with transmog viewing OFF should produce
+-- clean captures with zero is_vanity flags; one with it ON may produce
+-- occasional fully-poisoned slots that the backend can flag accordingly).
+-- Returns nil on Epoch and on clients lacking C_Appearance entirely.
+local function transmogViewing()
+    if type(_G.C_Appearance) ~= "table"
+       or type(C_Appearance.CanSeeAppearances) ~= "function" then
+        return nil
+    end
+    local ok, val = pcall(C_Appearance.CanSeeAppearances)
+    if not ok then return nil end
+    return val and true or false
+end
+
 -- Wraps GetInstanceInfo() into a structured snapshot field so the backend
 -- can dispatch by both difficulty integer and the friendly name.
 --
@@ -146,6 +162,7 @@ function L.buildLocalCI(sessionId)
         arena_teams = arenaTeams(),
         pet = petInfo(),
         instance = instanceInfo(),
+        transmog_viewing = transmogViewing(),  -- v0.3.0: logger's "show transmog" setting
     }
 
     if isAscension then

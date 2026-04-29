@@ -7,13 +7,16 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.2.4"
+C.VERSION = "0.3.0"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
--- parsing for talents / mystic / vanity. Forces an inspect-cache wipe on
--- first 0.2.0 boot via InspectCache.rehydrate's schema guard, which is
--- acceptable; the cache repopulates within the first cold cycle.
-C.SCHEMA_VERSION = 3
+-- parsing for talents / mystic / vanity.
+-- Bumped to 4 in 0.3.0: dropped the vanity_item_id field on gear entries
+-- (no longer captured; backend should ignore on v4+ snapshots), added a
+-- top-level transmog_viewing field on local CIs (logger's "show transmog
+-- on inspect" preference). Schema bumps wipe the inspect cache via
+-- InspectCache.rehydrate's schema guard - acceptable, repopulates fast.
+C.SCHEMA_VERSION = 4
 
 -- Addon channel
 C.ADDON_PREFIX = "ALC"
@@ -72,14 +75,6 @@ C.CHUNK_PAYLOAD_MAX_BYTES      = 950  -- empirical 1023-char fail-reason cap mea
 -- CI freshness thresholds
 C.CI_FRESH_MAX_MS   = 60000
 C.CI_STALE_MAX_MS   = 180000
-
--- Vanity divergence-poll cap. The vanity overlay packet ripens client-side
--- after the initial inspect on a non-deterministic delay; we re-read
--- GetInventoryItemID a few times until divergence appears or we give up.
--- 8 polls × 1s = 8s total ripening window, comfortably wider than the
--- typical 2-4s we've seen in the wild on Bronzebeard.
-C.VANITY_POLL_MAX_ATTEMPTS = 8
-C.VANITY_POLL_INTERVAL_S = 1.0
 
 -- Peers per OnUpdate frame when draining the deferred publish queue. With
 -- 60fps and a 25-man raid that's 24 peers / 2 per frame = 12 frames =

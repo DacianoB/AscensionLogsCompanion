@@ -17,105 +17,6 @@ local function now()
     return GetTime()
 end
 
--- Transmog-visibility gate. When the user has C_Appearance.SetCanSeeAppearances
--- disabled, GetInventoryItemLink already returns the real (non-vanity) item,
--- so all the vanity-overlay capture work is pointless. Skip it to free up
--- inspect budget for raid coverage. When transmog viewing is on (default
--- WoW behavior), keep doing the full vanity capture path.
---
--- On Epoch, C_Appearance doesn't exist AND there's no transmog system at all
--- (verified 2026-04-28 via probe: zero divergence across all slots, no
--- C_VanityCollection / C_Wardrobe / C_Transmog / EpochTransmog globals). So
--- we short-circuit to false on the epoch profile to skip all vanity work.
-local function transmogVisible()
-    if ALC.Profile == "epoch" then return false end
-    if type(_G.C_Appearance) ~= "table"
-       or type(C_Appearance.CanSeeAppearances) ~= "function" then
-        return true  -- API absent; assume worst case (transmog visible)
-    end
-    local ok, val = pcall(C_Appearance.CanSeeAppearances)
-    return (ok and val) and true or false
-end
-
--- Forward declaration: vanityPoll calls resolveUnit which is defined below.
--- Lua resolves locals lexically at parse time, so without this declaration
--- the reference would resolve to global _G.resolveUnit (nil) and crash at
--- first poll. Same gotcha that bit v0.1.7's broadcast/scheduleAnnounce; see
--- ascension-logs-companion-developer-guide.md "Forward declarations".
-local resolveUnit
-
--- Lightweight vanity-divergence poll. Replaces the heavy "next_scan_at = +1s"
--- retry that re-fired full inspects. This only re-reads GetInventoryItemID
--- (a client-side cache lookup) and patches vanity_item_id onto the cached
--- gear entries when divergence newly appears.
---
--- Self-rescheduling: each poll either finds divergence and stops, or
--- bumps vanity_check_attempts and queues another poll, up to
--- VANITY_POLL_MAX_ATTEMPTS. Stops if config disables vanity capture or
--- if we lose the unit.
-local function vanityPoll(guid)
-    local entry = ALC.Capture.InspectCache.get(guid)
-    if not entry or not entry.ci or not entry.ci.gear then return end
-    if entry.vanity_check_attempts == nil then return end  -- divergence already found, or aborted
-
-    local unit = resolveUnit(guid)
-    if not unit or not UnitExists(unit) or UnitGUID(unit) ~= guid then
-        -- Unit gone (out of range, zoned, deserted); stop polling
-        entry.vanity_check_attempts = nil
-        ALC.Capture.InspectCache.set(guid, entry)
-        return
-    end
-    if not GetInventoryItemID then return end
-
-    local newDiverges = 0
-    for _, gearEntry in ipairs(entry.ci.gear) do
-        local slot = gearEntry.slot
-        if slot then
-            local appearanceId = GetInventoryItemID(unit, slot)
-            if appearanceId and appearanceId ~= gearEntry.item_id
-               and gearEntry.vanity_item_id ~= appearanceId then
-                gearEntry.vanity_item_id = appearanceId
-                newDiverges = newDiverges + 1
-            end
-        end
-    end
-
-    if newDiverges > 0 then
-        entry.vanity_check_attempts = nil
-        entry.vanity_check_pull_id = nil
-        entry.last_success_at = time()
-        ALC.Capture.InspectCache.set(guid, entry)
-        if ALC.Capture.SnapshotPipeline and ALC.Capture.SnapshotPipeline.publishPeerInspects then
-            ALC.Capture.SnapshotPipeline.publishPeerInspects()
-        end
-        ALC.Core.Logger.debug(string.format(
-            "vanityPoll patched %d slot(s) for %s after %d attempt(s)",
-            newDiverges, UnitName(unit) or guid, entry.vanity_check_attempts or 0))
-        return
-    end
-
-    -- No divergence yet; reschedule if we have attempts left
-    local attempts = (entry.vanity_check_attempts or 0) + 1
-    if attempts < C.VANITY_POLL_MAX_ATTEMPTS then
-        entry.vanity_check_attempts = attempts
-        ALC.Capture.InspectCache.set(guid, entry)
-        if _G.C_Timer and C_Timer.After then
-            C_Timer.After(C.VANITY_POLL_INTERVAL_S, function() vanityPoll(guid) end)
-        end
-    else
-        -- Cap reached; give up. No divergence => assume no transmog.
-        entry.vanity_check_attempts = nil
-        ALC.Capture.InspectCache.set(guid, entry)
-    end
-end
-
--- Public entry point so finalizeInspect can request a poll.
-function I.scheduleVanityPoll(guid)
-    if _G.C_Timer and C_Timer.After then
-        C_Timer.After(C.VANITY_POLL_INTERVAL_S, function() vanityPoll(guid) end)
-    end
-end
-
 local function canInspectUnit(unit)
     return UnitExists(unit)
        and UnitIsVisible(unit)
@@ -127,10 +28,7 @@ local function canInspectUnit(unit)
        and CheckInteractDistance(unit, 4)  -- 28y Follow range
 end
 
--- Assigned (not `local function`) to satisfy the forward declaration above.
--- `local function` would shadow the forward decl with a fresh local, leaving
--- vanityPoll's reference still pointing at global nil.
-resolveUnit = function(guid)
+local function resolveUnit(guid)
     if not guid then return nil end
     -- Raid roster (priority for in-raid inspects)
     for i = 1, (GetNumRaidMembers() or 0) do
@@ -286,22 +184,6 @@ local function finalizeInspect()
         if secondCount > (infl.firstSlotCount or 0) then
             ci.gear = ALC.Capture.GearScan.readGear(unit)
         end
-        -- Vanity re-scan: GetInventoryItemID for inspected units may take
-        -- longer to populate than GetInventoryItemLink. Patch vanity_item_id
-        -- onto whatever entries diverge now. Skipped entirely when the user
-        -- has transmog viewing off, since GetInventoryItemLink already
-        -- returns real gear in that case and divergence detection is moot.
-        if transmogVisible() and ci.gear and GetInventoryItemID then
-            for _, entry in ipairs(ci.gear) do
-                local slot = entry.slot
-                if slot then
-                    local appearanceId = GetInventoryItemID(unit, slot)
-                    if appearanceId and appearanceId ~= entry.item_id then
-                        entry.vanity_item_id = appearanceId
-                    end
-                end
-            end
-        end
         -- Ascension-only enrichment: mystic enchants + CAO talent state.
         -- Both APIs are absent on Epoch (probe-confirmed), and the inspect
         -- result events for them never fire there.
@@ -381,45 +263,33 @@ local function finalizeInspect()
         -- constraint absorbs any over-emission within a pull.
         scheduleNext(entry, outcome)
 
-        -- Vanity-staleness poll: when GetInventoryItemLink and GetInventoryItemID
-        -- both return the same value (no divergence), we can't distinguish
-        -- "no transmog" from "API not yet ripened to expose the divergence."
-        -- The transient hybrid state where divergence appears is
-        -- non-deterministic, so we re-poll up to VANITY_POLL_MAX_ATTEMPTS
-        -- times at VANITY_POLL_INTERVAL_S intervals.
+        -- v0.3.0 suspect-retry: if any captured slot's item_id resolved to a
+        -- vanity-registry item (link returned the appearance instead of the
+        -- underlying real item), schedule one re-inspect via the existing
+        -- inspect loop. Bumping next_scan_at brings the peer back to the
+        -- front of the queue without us having to call NotifyInspect outside
+        -- the tick context (which would orphan the in-flight tracking).
         --
-        -- 0.2.0 redesign: previously this set entry.next_scan_at = +1s, which
-        -- sent the peer back through the full inspect loop tick - re-firing
-        -- NotifyInspect + C_CharacterAdvancement.InspectUnit + C_MysticEnchant.Inspect
-        -- on every retry. Three server packets × 10 retries × 24 peers per pull
-        -- was the dominant baseline-CPU and inspect-loop-budget cost reported
-        -- by Nace in ZG report 7976.
-        --
-        -- The new path uses a self-rescheduling C_Timer.After closure that ONLY
-        -- re-reads GetInventoryItemID for the cached gear slots. No server
-        -- packets, no event roundtrip, no inspect-loop tick consumed. The
-        -- deferred 8s rescan in tick() (below) already proved this read-only
-        -- pattern works for vanity ripening. Cost per poll: 19 GetInventoryItemID
-        -- calls + 19 integer compares = microseconds.
-        if transmogVisible() and outcome == "success" and ci and ci.gear then
-            local newPullId = tracker and tracker.getCurrentPullId() or 0
-            if entry.vanity_check_pull_id ~= newPullId then
-                entry.vanity_check_attempts = 0
-                entry.vanity_check_pull_id = newPullId
-            end
-
-            local divergedSlots = 0
+        -- Per-pull gate: only retry once per (peer, pull) tuple. If the
+        -- second inspect ALSO comes back suspect, accept whatever we got and
+        -- leave is_vanity flagged for backend filtering. Bounded behavior,
+        -- no polling loop. Replaces the v0.2.x 8-poll vanity mechanism.
+        if outcome == "success" and ci and ci.gear then
+            local hasSuspect = false
             for _, gearEntry in ipairs(ci.gear) do
-                if gearEntry.vanity_item_id then
-                    divergedSlots = divergedSlots + 1
-                end
+                if gearEntry.is_vanity then hasSuspect = true; break end
             end
-
-            if divergedSlots > 0 then
-                entry.vanity_check_attempts = nil
-                entry.vanity_check_pull_id = nil
-            elseif (entry.vanity_check_attempts or 0) < C.VANITY_POLL_MAX_ATTEMPTS then
-                I.scheduleVanityPoll(infl.guid)
+            if hasSuspect then
+                local newPullId = tracker and tracker.getCurrentPullId() or 0
+                if entry.suspect_retried_pull_id ~= newPullId then
+                    entry.suspect_retried_pull_id = newPullId
+                    entry.next_scan_at = time() + 2  -- re-inspect in ~2s via normal tick path
+                    if ALC.Core.Logger and ALC.Core.Logger.debug then
+                        ALC.Core.Logger.debug(string.format(
+                            "Suspect gear for %s; scheduling single re-inspect in 2s",
+                            UnitName(unit) or infl.guid))
+                    end
+                end
             end
         end
 
@@ -566,71 +436,6 @@ local function tick()
         end
     end
     ALC.Core.Metrics.inc("inspect_sent")
-
-    -- Schedule a deferred vanity-overlay re-scan when transmog viewing is
-    -- on. Out-of-combat manual inspects (e.g. in Orgrimmar) reliably surface
-    -- divergence because the user keeps the frame open 5-30s. In-combat
-    -- auto-inspects need a longer read window for the same packets to
-    -- arrive. 8s is a compromise between API ripening and publish delay.
-    -- If transmog viewing is off, GetInventoryItemLink already returns the
-    -- real (non-vanity) item, so the rescan is pointless and we skip it.
-    if transmogVisible() then
-        local deferredGuid = nextGuid
-        local deferredFn = function()
-            if not UnitExists(unit) or UnitGUID(unit) ~= deferredGuid then return end
-            local cachedEntry = ALC.Capture.InspectCache.get(deferredGuid)
-            if not cachedEntry or not cachedEntry.ci or not cachedEntry.ci.gear then return end
-            if not GetInventoryItemID then return end
-
-            local newDiverges = 0
-            for _, gearEntry in ipairs(cachedEntry.ci.gear) do
-                local slot = gearEntry.slot
-                if slot then
-                    local appearanceId = GetInventoryItemID(unit, slot)
-                    if appearanceId and appearanceId ~= gearEntry.item_id
-                       and gearEntry.vanity_item_id ~= appearanceId then
-                        gearEntry.vanity_item_id = appearanceId
-                        newDiverges = newDiverges + 1
-                    end
-                end
-            end
-
-            if newDiverges > 0 then
-                -- Bump last_success_at so the next publishPeerInspects
-                -- treats this as a fresh CI worth re-enqueueing.
-                cachedEntry.last_success_at = time()
-                cachedEntry.vanity_check_attempts = nil
-                ALC.Capture.InspectCache.set(deferredGuid, cachedEntry)
-                if ALC.Capture.SnapshotPipeline and ALC.Capture.SnapshotPipeline.publishPeerInspects then
-                    ALC.Capture.SnapshotPipeline.publishPeerInspects()
-                end
-                ALC.Core.Logger.debug(string.format(
-                    "Deferred vanity-rescan patched %d slot(s) for %s and re-published.",
-                    newDiverges, UnitName(unit) or deferredGuid))
-            end
-
-            -- Close the InspectFrame opened by InspectUnit() in tick(). We
-            -- SetAlpha(0)'d it to keep it invisible while events fired; now
-            -- that we've read what we need, hide it and restore alpha so the
-            -- user's next manual right-click→Inspect renders normally.
-            if _G.InspectFrame then
-                pcall(InspectFrame.Hide, InspectFrame)
-                pcall(InspectFrame.SetAlpha, InspectFrame, 1)
-            end
-        end
-
-        if _G.C_Timer and C_Timer.After then
-            C_Timer.After(8.0, deferredFn)
-        else
-            local tf = CreateFrame("Frame")
-            local startedAt = GetTime()
-            tf:SetScript("OnUpdate", function(self, el)
-                if GetTime() - startedAt >= 8.0 then
-                    self:SetScript("OnUpdate", nil); deferredFn()
-                end
-            end)
-        end
-    end
 end
 
 function I.onRosterChange()
