@@ -1,13 +1,13 @@
 -- Zone/ZoneMonitor.lua
--- Auto-toggles /combatlog on zone transitions. Distinct from FangYuanWoW/CombatLogs
--- in one critical way: the started-logging popup fires only on
--- ZONE_CHANGED_NEW_AREA, never on ZONE_CHANGED or ZONE_CHANGED_INDOORS.
--- This avoids popup spam when walking through doors in a raid instance or
--- into a monitored subzone.
+-- Auto-toggles /combatlog on zone transitions.
 --
--- The /combatlog toggle itself does run on all three events because subzone
--- gated outdoor bosses (Tainted Scar, Scarab Wall) are only detectable that
--- way.
+-- 0.2.3: only main-zone changes (ZONE_CHANGED_NEW_AREA + PLAYER_ENTERING_WORLD)
+-- drive auto-logging. Sub-zone events (ZONE_CHANGED, ZONE_CHANGED_INDOORS) are
+-- not registered. Tradeoff: outdoor world-boss subzones (Lord Kazzak in
+-- Tainted Scar, Scarab Wall, Doomwalker in Snowblind Hills, etc.) no longer
+-- auto-trigger logging on entry - they need a manual /combatlog. We accept
+-- this to keep behavior predictable inside indoor instances, where sub-zone
+-- noise was causing surprise re-starts (see e_shikari report on v0.2.0/0.2.1).
 --
 -- Coexistence: checks LoggingCombat() before calling /combatlog, so if
 -- another addon (FangYuanWoW/CombatLogs) has already enabled logging, we
@@ -89,7 +89,9 @@ StaticPopupDialogs["ALC_COMBATLOG_STARTED"] = {
         -- doesn't go through us, so it works fine).
         if Z.lastLoggedZone then
             Z.userDeclinedForZone[Z.lastLoggedZone] = true
-            ALC.Core.Logger.debug("User declined auto-logging for: " .. Z.lastLoggedZone)
+            if ALC.Core.Logger and ALC.Core.Logger.debug then
+                ALC.Core.Logger.debug("User declined auto-logging for: " .. Z.lastLoggedZone)
+            end
         end
         Z.startedByUs = false
         Z.lastLoggedZone = nil
@@ -273,8 +275,8 @@ function Z.start()
         end
     end
 
+    -- Main-zone-only registration. ZONE_CHANGED + ZONE_CHANGED_INDOORS
+    -- intentionally not registered (see file header for rationale).
     ALC.RegisterEvent("ZONE_CHANGED_NEW_AREA", function() Z.check(true) end)
-    ALC.RegisterEvent("ZONE_CHANGED", function() Z.check(false) end)
-    ALC.RegisterEvent("ZONE_CHANGED_INDOORS", function() Z.check(false) end)
     ALC.RegisterEvent("PLAYER_ENTERING_WORLD", function() Z.check(true) end)
 end
