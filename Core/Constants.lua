@@ -7,13 +7,22 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.2.4"
+C.VERSION = "0.3.1"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
--- parsing for talents / mystic / vanity. Forces an inspect-cache wipe on
--- first 0.2.0 boot via InspectCache.rehydrate's schema guard, which is
--- acceptable; the cache repopulates within the first cold cycle.
-C.SCHEMA_VERSION = 3
+-- parsing for talents / mystic / vanity.
+-- 0.3.0 was a brief experiment (schema 4) that dropped vanity_item_id and
+-- added transmog_viewing. We reverted the simplification in 0.3.1 because
+-- live testing showed Ascension's q=6/ilvl=1 mythic appearances poison the
+-- link in ways the simplified read couldn't detect, and the GetInventoryItemID
+-- divergence path actually surfaces useful data for the typical transmog
+-- cases we see most.
+-- Bumped to 5 in 0.3.1: combines v0.2.4's vanity-poll pipeline (vanity_item_id,
+-- is_vanity flags via GetInventoryItemID + C_VanityCollection) WITH the new
+-- transmog_viewing field on local CIs from 0.3.0. Forces an inspect-cache
+-- wipe on first 0.3.1 boot via InspectCache.rehydrate's schema guard;
+-- repopulates within the first cold cycle.
+C.SCHEMA_VERSION = 5
 
 -- Addon channel
 C.ADDON_PREFIX = "ALC"

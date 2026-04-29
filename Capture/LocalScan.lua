@@ -65,6 +65,25 @@ local function petInfo()
     return nil
 end
 
+-- Reads the logger's "show transmog on inspected players" client setting.
+-- Captured on the local CI so the backend can correlate logger preferences
+-- with capture quality. Validated 2026-04-29 via Bowlie inspect: when the
+-- logger has transmog viewing ON, GetInventoryItemLink for inspected peers
+-- can return the visual overlay item ID instead of the underlying real
+-- item (specifically for Ascension's q=6 ilvl=1 mythic-tier appearances).
+-- Reports flagged with transmog_viewing=true should be considered to have
+-- potentially poisoned gear data on slots where peers have such appearances.
+-- Returns nil on Epoch (no C_Appearance) and on clients lacking the API.
+local function transmogViewing()
+    if type(_G.C_Appearance) ~= "table"
+       or type(C_Appearance.CanSeeAppearances) ~= "function" then
+        return nil
+    end
+    local ok, val = pcall(C_Appearance.CanSeeAppearances)
+    if not ok then return nil end
+    return val and true or false
+end
+
 -- Wraps GetInstanceInfo() into a structured snapshot field so the backend
 -- can dispatch by both difficulty integer and the friendly name.
 --
@@ -146,6 +165,7 @@ function L.buildLocalCI(sessionId)
         arena_teams = arenaTeams(),
         pet = petInfo(),
         instance = instanceInfo(),
+        transmog_viewing = transmogViewing(),  -- v0.3.1: logger's "show transmog" setting; gates capture quality interpretation on the backend
     }
 
     if isAscension then

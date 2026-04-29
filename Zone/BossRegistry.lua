@@ -98,6 +98,25 @@ B.BY_ZONE["Maraudon"] = {
     "Princess Theradras",
 }
 
+-- Uldaman (5-man, Badlands). Vanilla 1.12 lineup. The Lost Dwarves are a
+-- group encounter (Baelog + Eric the Swift + Olaf) targetable individually
+-- so we register all three names plus the group label. Eric's name varies
+-- across cores ("The Swift" vs "the Swift"); registered both forms.
+B.BY_ZONE["Uldaman"] = {
+    "Revelosh",
+    "Baelog",
+    "Eric \"The Swift\"",
+    "Eric the Swift",       -- some cores drop the quotes
+    "Olaf",
+    "The Lost Dwarves",     -- group label, occasionally used as canonical
+    "Ironaya",
+    "Obsidian Sentinel",
+    "Ancient Stone Keeper",
+    "Galgann Firehammer",
+    "Grimlok",
+    "Archaedas",
+}
+
 -- Zul'Farrak (5-man, Tanaris). Vanilla 1.12 lineup. The Sergeant Bly +
 -- prisoner event spawns 5 prisoner NPCs that fight alongside the player
 -- group; Bly is the named boss-tagged target. Gahz'rilla is summoned at
