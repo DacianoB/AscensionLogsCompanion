@@ -460,24 +460,59 @@ local function tryFinalize()
     end
 end
 
+-- Defer the actual readGear/buildInspectCI by INSPECT_FLIP_DELAY_S after
+-- INSPECT_TALENT_READY fires.
+--
+-- Empirical observation 2026-04-29 via /aip probe on a Shaman peer with the
+-- Ascension q=6/ilvl=1 mythic appearance system (Fel Betrayer set):
+-- GetInventoryItemLink initially returns the VISUAL appearance item id
+-- (cached pre-inspect) and FLIPS to the real underlying item id at ~290ms
+-- after INSPECT_TALENT_READY. No event signals the flip. Reading at +0ms
+-- (the prior behavior) captured the q=6/ilvl=1 cosmetic items as if they
+-- were real gear -- silent data corruption that misrepresented T2 raid
+-- shamans as wearing ilvl-10 trash. Reading at +400ms gives margin past
+-- the 290ms flip while staying inside the 1.0s inspect tick budget so
+-- cold-cycle time is unchanged.
+--
+-- For peers without the mythic-appearance system the link doesn't flip,
+-- so the wait is unused but bounded inside the tick window. Net cycle
+-- time on a 25-man cold cycle: still ~25s.
 local function onInspectReady()
     local infl = I.inFlight
     if not infl then return end
-    local unit = resolveUnit(infl.guid)
-    if not unit or UnitGUID(unit) ~= infl.guid then
-        -- Target moved / roster changed before reply landed
-        I.inFlight = nil
-        ClearInspectPlayer()
-        return
+    local sessionId = _G.ALC_LocalState and _G.ALC_LocalState.session_id
+
+    local doRead = function()
+        -- Re-validate in-flight state in case the timer fired after a
+        -- target/roster change cleared I.inFlight or replaced the inflight.
+        if not I.inFlight or I.inFlight ~= infl then return end
+        if infl.gotTalent then return end  -- already read, idempotent
+
+        local unit = resolveUnit(infl.guid)
+        if not unit or UnitGUID(unit) ~= infl.guid then
+            -- Target moved / roster changed during the flip-wait window
+            I.inFlight = nil
+            ClearInspectPlayer()
+            return
+        end
+        -- Build the CI now (post-flip). CAO + mystic merge in via
+        -- finalizeInspect once their events fire (or 3s elapses).
+        infl.unit = unit
+        infl.ci = ALC.Capture.LocalScan.buildInspectCI(unit, sessionId)
+        infl.firstSlotCount = ALC.Capture.GearScan.populatedSlotCount(unit)
+        infl.gotTalent = true
+        infl.talentAt  = GetTime()
+        tryFinalize()
     end
-    -- Build the CI now while gear/talents are fresh; CAO + mystic get
-    -- merged in by finalizeInspect once their events fire (or 3s elapses).
-    infl.unit = unit
-    infl.ci = ALC.Capture.LocalScan.buildInspectCI(unit, _G.ALC_LocalState.session_id)
-    infl.firstSlotCount = ALC.Capture.GearScan.populatedSlotCount(unit)
-    infl.gotTalent = true
-    infl.talentAt  = GetTime()
-    tryFinalize()
+
+    if _G.C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(C.INSPECT_FLIP_DELAY_S, doRead)
+    else
+        -- Fallback: no C_Timer available, read immediately (3.3.5 forks
+        -- without C_Timer can't benefit from the flip delay; mythic-
+        -- appearance peers will still capture poisoned data on those forks).
+        doRead()
+    end
 end
 
 local function onCAResult()

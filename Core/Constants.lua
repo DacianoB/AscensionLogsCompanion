@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.2.5"
+C.VERSION = "0.2.6"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
 -- parsing for talents / mystic / vanity.
@@ -79,6 +79,18 @@ C.CHUNK_PAYLOAD_MAX_BYTES      = 950  -- empirical 1023-char fail-reason cap mea
 -- CI freshness thresholds
 C.CI_FRESH_MAX_MS   = 60000
 C.CI_STALE_MAX_MS   = 180000
+
+-- Delay between INSPECT_TALENT_READY and the actual gear/talent read.
+-- Empirical observation 2026-04-29 via /aip probe on a Shaman peer with
+-- the Ascension q=6/ilvl=1 mythic appearance system (Fel Betrayer set):
+-- GetInventoryItemLink initially returns the VISUAL appearance item id
+-- (cached state from before inspect packet 2 lands) and FLIPS to the real
+-- underlying item id at ~290ms after INSPECT_TALENT_READY. No event
+-- signals the flip. We defer the readGear call by 400ms so we capture the
+-- post-flip (real) item ids instead of the pre-flip (visual) ids. 400ms
+-- gives ~110ms margin past the observed flip while staying well inside
+-- the 1.0s inspect tick budget (cold-cycle time unchanged).
+C.INSPECT_FLIP_DELAY_S = 0.4
 
 -- Vanity divergence-poll cap. The vanity overlay packet ripens client-side
 -- after the initial inspect on a non-deterministic delay; we re-read
