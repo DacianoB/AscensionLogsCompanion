@@ -148,6 +148,12 @@ end
 -- combat-log window gets a fresh broadcast of every cached peer. Without
 -- pullId in the dedup key, peers with stable gear were broadcast exactly
 -- once per session, producing 2-of-18 coverage on rapid wipe-retry pulls.
+--
+-- This is the synchronous version, called from the periodic 30s ticker
+-- where the freeze cost is amortized across 30s of headroom and not
+-- coincident with a combat-start frame. For combat-start (PLAYER_REGEN_DISABLED)
+-- use publishPeerInspectsDeferred, which spreads the same work across
+-- frames to avoid the burst.
 function P.publishPeerInspects()
     if not shouldPublish() then return end
     local cache = ALC.Capture.InspectCache.snapshot()
@@ -189,10 +195,86 @@ function P.publishPeerInspects()
     end
 end
 
--- Helper: enqueue everything we have right now (own + peers).
+-- Deferred peer-publish queue. Drained by an OnUpdate at PEERS_PER_DEFER_FRAME
+-- entries per frame so the synchronous LibDeflate compression cost (~50ms
+-- per 25-man peer) doesn't all land on the same frame as PLAYER_REGEN_DISABLED.
+-- 0.1.8's wipe-retry coverage fix correctly re-broadcasts every cached peer
+-- on each combat enter, but doing it synchronously was the dominant cause
+-- of multi-second freezes at combat start (Nace report 7976). Same coverage,
+-- spread across ~12 frames at 60fps for a 25-man.
+P.deferQueue = nil
+
+-- Build the work queue. Cheap (no compression). The actual serialization
+-- happens during drain.
+function P.publishPeerInspectsDeferred()
+    if not shouldPublish() then return end
+    local cache = ALC.Capture.InspectCache.snapshot()
+    P.lastPeerEnqueued = P.lastPeerEnqueued or {}
+
+    local tracker = ALC.Capture.EncounterTracker
+    local currentBoss   = tracker and tracker.getCurrentBoss() or nil
+    local currentPullId = tracker and tracker.getCurrentPullId() or 0
+
+    P.deferQueue = P.deferQueue or {}
+    local queued = 0
+    for guid, entry in pairs(cache) do
+        if entry.ci and entry.last_success_at then
+            local key = guid .. ":" .. tostring(entry.last_success_at)
+                        .. ":" .. tostring(currentPullId)
+            if P.lastPeerEnqueued[key] ~= true then
+                P.lastPeerEnqueued[key] = true  -- mark now so subsequent calls don't double-queue
+                P.deferQueue[#P.deferQueue + 1] = {
+                    guid = guid,
+                    entry = entry,
+                    currentBoss = currentBoss,
+                    currentPullId = currentPullId,
+                }
+                queued = queued + 1
+            end
+        end
+    end
+    if queued > 0 then
+        ALC.Core.Logger.debug("Peer CIs deferred: " .. queued
+            .. " peers queued (pullId=" .. tostring(currentPullId) .. ")")
+    end
+end
+
+-- Drain at most PEERS_PER_DEFER_FRAME entries; called every OnUpdate frame.
+local function drainDeferQueue()
+    local queue = P.deferQueue
+    if not queue or #queue == 0 then return end
+    local budget = C.PEERS_PER_DEFER_FRAME or 2
+    local drained = 0
+    for _ = 1, budget do
+        if #queue == 0 then break end
+        local item = table.remove(queue, 1)
+        if item and item.entry and item.entry.ci then
+            if item.currentBoss then
+                item.entry.ci.captured_for_boss    = item.currentBoss
+                item.entry.ci.captured_for_pull_id = item.currentPullId
+            end
+            local chunks = serializeCIToChunks(item.entry.ci)
+            if chunks then
+                for _, chunk in ipairs(chunks) do
+                    ALC.Transport.SpellFailedHijack.enqueue(chunk)
+                end
+                drained = drained + #chunks
+            end
+        end
+    end
+end
+
+-- Helper: enqueue everything we have right now (own + peers, synchronous).
 function P.publishAll()
     P.publishOwnIfChanged()
     P.publishPeerInspects()
+end
+
+-- Helper: own CI sync (cheap, single peer), peer CIs deferred across frames.
+-- Used by PLAYER_REGEN_DISABLED to avoid the burst freeze.
+function P.publishAllDeferred()
+    P.publishOwnIfChanged()
+    P.publishPeerInspectsDeferred()
 end
 
 local function onLogin()
@@ -232,15 +314,23 @@ function P.start()
         -- queue (would otherwise emit late and mis-attribute to this pull's
         -- combat-log window in the backend's timestamp-based dispatcher),
         -- and clear the per-broadcast dedup so every cached peer re-emits
-        -- with fresh pull metadata. publishAll re-enqueues everything.
+        -- with fresh pull metadata.
+        --
+        -- 0.2.0: switched from synchronous publishAll() to publishAllDeferred()
+        -- so the 25-peer LibDeflate compression sweep spreads across ~12
+        -- frames instead of one. publishOwnIfChanged still runs synchronously
+        -- (one peer, cheap, hash-deduped); peer compression is the cost
+        -- that needs spreading.
         if ALC.Transport.SpellFailedHijack
            and ALC.Transport.SpellFailedHijack.clearQueue then
             ALC.Transport.SpellFailedHijack.clearQueue()
         end
         P.lastPeerEnqueued = {}
-        P.publishAll()
+        P.publishAllDeferred()
     end)
-    -- Periodic peer republish: 30s tick (best-effort; 3.3.5 may lack C_Timer)
+    -- Periodic peer republish: 30s tick (best-effort; 3.3.5 may lack C_Timer).
+    -- This path stays synchronous because the cost is amortized across 30s
+    -- of headroom and doesn't coincide with a combat-start frame.
     if _G.C_Timer and C_Timer.NewTicker then
         C_Timer.NewTicker(30.0, P.publishPeerInspects)
     else
@@ -250,6 +340,14 @@ function P.start()
             if accum >= 30.0 then accum = 0; P.publishPeerInspects() end
         end)
     end
+
+    -- Drain the deferred peer-publish queue every frame. Cheap fast-path
+    -- when queue is empty (one nil-check per frame). Active drain pulls
+    -- PEERS_PER_DEFER_FRAME entries through serializeCIToChunks per frame.
+    ALC.frame:HookScript("OnUpdate", function(self, el)
+        drainDeferQueue()
+    end)
+
     ALC.Core.Logger.debug("SnapshotPipeline.start() registered all events")
 end
 

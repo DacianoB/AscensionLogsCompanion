@@ -7,8 +7,13 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.1.9"
-C.SCHEMA_VERSION = 2
+C.VERSION = "0.2.0"
+-- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
+-- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
+-- parsing for talents / mystic / vanity. Forces an inspect-cache wipe on
+-- first 0.2.0 boot via InspectCache.rehydrate's schema guard, which is
+-- acceptable; the cache repopulates within the first cold cycle.
+C.SCHEMA_VERSION = 3
 
 -- Addon channel
 C.ADDON_PREFIX = "ALC"
@@ -23,7 +28,17 @@ C.CI_SENTINEL_PREFIX = "[[ALC_CI_v2_"
 C.CI_SENTINEL_SUFFIX = "]]"
 
 -- Inspect timings
-C.INSPECT_MIN_INTERVAL_S = 1.0  -- empirically validated 2026-04-25 on Bronzebeard via /alcprobe throttle-blast 1.0: 24/24 fires got replies, 0% server-throttled. 25-man cold cycle: 48s → 24s.
+C.INSPECT_MIN_INTERVAL_S = 1.0  -- empirically validated 2026-04-25 on Bronzebeard via /alcprobe throttle-blast 1.0: 24/24 fires got replies, 0% server-throttled. 25-man cold cycle: 48s → 24s. Legacy fallback when ALC.Profile is unset.
+
+-- Per-server inspect throttle. Resolved by ALC.Core.Profile.inspectIntervalSeconds()
+-- after Profile.detect() runs in Init.lua boot. Validated 2026-04-28 on Epoch
+-- (Kezan) via /epochprobe throttle-blast: 24/24 replies at 0.30s close-range,
+-- so 0.5s leaves comfortable margin and roughly halves cold-cycle time vs
+-- Ascension's 1.0s floor.
+C.INSPECT_MIN_INTERVAL_S_BY_PROFILE = {
+    ascension = 1.0,
+    epoch     = 0.5,
+}
 C.INSPECT_TIMEOUT_S      = 5.0
 C.INSPECT_RESCAN_MS      = 300000  -- 5 min (used when boss tracking pins a current boss)
 C.INSPECT_NOBOSS_RESCAN_MS = 60000   -- 1 min fallback when no boss is tracked (heroic dungeons, custom content, EncounterTracker silent failures)
@@ -58,6 +73,19 @@ C.CHUNK_PAYLOAD_MAX_BYTES      = 950  -- empirical 1023-char fail-reason cap mea
 C.CI_FRESH_MAX_MS   = 60000
 C.CI_STALE_MAX_MS   = 180000
 
+-- Vanity divergence-poll cap. The vanity overlay packet ripens client-side
+-- after the initial inspect on a non-deterministic delay; we re-read
+-- GetInventoryItemID a few times until divergence appears or we give up.
+-- 8 polls × 1s = 8s total ripening window, comfortably wider than the
+-- typical 2-4s we've seen in the wild on Bronzebeard.
+C.VANITY_POLL_MAX_ATTEMPTS = 8
+C.VANITY_POLL_INTERVAL_S = 1.0
+
+-- Peers per OnUpdate frame when draining the deferred publish queue. With
+-- 60fps and a 25-man raid that's 24 peers / 2 per frame = 12 frames =
+-- ~200ms to drain the queue, vs ~1s synchronous burn before. Tunable.
+C.PEERS_PER_DEFER_FRAME = 2
+
 -- Defaults for config
 C.DEFAULT_CONFIG = {
     debug = false,
@@ -67,4 +95,5 @@ C.DEFAULT_CONFIG = {
     is_logger = true,
     silent_auto_logging = false,  -- skip both start + stop popups; logging stays on across zone changes until user manually toggles
     log_dungeons = true,          -- when off, auto-/combatlog only fires for raids (instanceType=="raid"), skipping 5-man dungeons
+    vanity_capture_enabled = true,  -- when false, skip the vanity-divergence poll entirely (saves baseline CPU for users who don't care about transmog data)
 }

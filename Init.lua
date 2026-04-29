@@ -12,6 +12,11 @@ local function boot()
         end
     end
 
+    -- Detect server family BEFORE any module starts so they can branch on
+    -- ALC.Profile during their .start() hooks. Sets ALC.Profile to one of
+    -- "ascension" | "epoch" | "unknown" and caches to ALC_Config.
+    ALC.Core.Profile.detect()
+
     -- Per-character state
     ALC.Parser.Session.init()
 
@@ -51,6 +56,7 @@ local function boot()
         local hasCAO = type(_G.CAO_Known) == "table"
         local hasMystic = type(_G.AscensionUI) == "table"
                      and type(_G.AscensionUI.MysticEnchant) == "table"
+        ALC.Core.Logger.debug("Server profile: " .. tostring(ALC.Profile))
         ALC.Core.Logger.debug("CAO_Known present: " .. tostring(hasCAO))
         ALC.Core.Logger.debug("AscensionUI.MysticEnchant present: " .. tostring(hasMystic))
     end

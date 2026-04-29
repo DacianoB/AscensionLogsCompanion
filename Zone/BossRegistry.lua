@@ -96,6 +96,68 @@ B.BY_ZONE["Maraudon"] = {
     "Princess Theradras",
 }
 
+-- Zul'Farrak (5-man, Tanaris). Vanilla 1.12 lineup. The Sergeant Bly +
+-- prisoner event spawns 5 prisoner NPCs that fight alongside the player
+-- group; Bly is the named boss-tagged target. Gahz'rilla is summoned at
+-- the trough via Mallet of Zul'Farrak.
+B.BY_ZONE["Zul'Farrak"] = {
+    "Antu'sul",
+    "Theka the Martyr",
+    "Witch Doctor Zum'rah",
+    "Nekrum Gutchewer",
+    "Shadowpriest Sezz'ziz",
+    "Hydromancer Velratha",
+    "Sergeant Bly",
+    "Gahz'rilla",
+    "Chief Ukorz Sandscalp",
+}
+
+-- Blackrock Depths (5-man, BRM). Vanilla 1.12 lineup. The Ring of Law
+-- rotates one of six bosses per run; all six listed so any roll matches.
+-- Theldren is the optional arena PvP encounter (group of player-class
+-- mobs). Verek is Stilgiss's pet but appears in the kill list on some
+-- private cores, included for completeness. The Seven Dwarves are
+-- handled as a group encounter in WoW; we register the canonical
+-- "Doom'rel" name (the leader summoned at the runestone) plus the
+-- individuals so any tag works.
+B.BY_ZONE["Blackrock Depths"] = {
+    "Lord Roccor",
+    "High Interrogator Gerstahn",
+    -- Ring of Law (one rolls per run)
+    "Anub'shiah",
+    "Eviscerator",
+    "Gorosh the Dervish",
+    "Grizzle",
+    "Hedrum the Creeper",
+    "Ok'thor the Breaker",
+    "Theldren",  -- optional PvP arena encounter
+    "Pyromancer Loregrain",
+    "Houndmaster Grebmar",
+    "Lord Incendius",
+    "Warder Stilgiss",
+    "Verek",
+    "Fineous Darkvire",
+    "Bael'Gar",
+    "General Angerforge",
+    "Golem Lord Argelmach",
+    "Hurley Blackbreath",
+    "Phalanx",
+    "Plugger Spazzring",
+    "Ambassador Flamelash",
+    "Magmus",
+    "Emperor Dagran Thaurissan",
+    "Princess Moira Bronzebeard",
+    -- The Seven Dwarves (Doomforge group encounter)
+    "Doom'rel",
+    "Doom'rel the Necromancer",  -- some cores include the title
+    "Doom'caller",
+    "Doom'priest",
+    "Doom'spirit",
+    "Doom'rage",
+    "Doom'cloak",
+    "Doom'whisper",
+}
+
 -- Scholomance (5-man, EPL). Vanilla 1.12 lineup. Verify exact names in
 -- runtime via /alc boss add if any are off (e.g. some servers spell
 -- "Doctor Theolen Krastinov" without the title).

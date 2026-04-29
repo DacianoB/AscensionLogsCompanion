@@ -65,22 +65,63 @@ local function petInfo()
     return nil
 end
 
+-- Wraps GetInstanceInfo() into a structured snapshot field so the backend
+-- can dispatch by both difficulty integer and the friendly name.
+--
+-- 2026-04-28 Ascension probe (Ragefire Chasm, Bronzebeard) confirmed Ascension
+-- extends vanilla 3.3.5's difficulty index past the standard 1-2 cap:
+--   index 1 = Normal       difficulty_name = "" (blank)
+--   index 2 = Heroic       difficulty_name = "5 Player (Heroic)"
+--   index 3 = Mythic       difficulty_name = "" (blank)
+-- player_difficulty mirrors the index with a 0-based offset (0/1/2). Because
+-- difficulty_name is unreliable (blank for both Normal and Mythic), the
+-- backend should key on (instance_type, difficulty_index) and look up the
+-- friendly label in its own table. map_id is the stable instance identifier;
+-- name can change on localized clients but map_id is constant.
+--
+-- Server-agnostic: GetInstanceInfo exists on both Ascension and Epoch (and
+-- vanilla 1.12 content surfaces sane defaults too). Raid difficulty indices
+-- and Mythic+ keystone fields haven't been probed yet; capture raw values
+-- and let the backend interpret as those probes land.
+local function instanceInfo()
+    if type(_G.GetInstanceInfo) ~= "function" then return nil end
+    local name, instType, diffIdx, diffName, maxPlayers,
+          playerDiff, isDynamic, mapId = GetInstanceInfo()
+    return {
+        name              = name,
+        instance_type     = instType,
+        difficulty_index  = diffIdx,
+        difficulty_name   = diffName,
+        max_players       = maxPlayers,
+        player_difficulty = playerDiff,
+        is_dynamic        = isDynamic and true or false,
+        map_id            = mapId,
+    }
+end
+
 function L.buildLocalCI(sessionId)
     local CAO = ALC.Capture.CAOScan
     local Myst = ALC.Capture.MysticEnchantScan
     local Gear = ALC.Capture.GearScan
     local C = ALC.Core.Constants
 
-    local specInfo = CAO.readActiveSpecInfo() or {}
+    local profile = ALC.Profile or "ascension"
+    local isAscension = (profile ~= "epoch")
+
+    -- Ascension-only enrichment. On Epoch the underlying APIs are absent so
+    -- these calls return nil/empty, but doing them explicitly conditional
+    -- keeps the Epoch snapshot clean of vestigial Ascension fields.
+    local specInfo = isAscension and (CAO.readActiveSpecInfo() or {}) or {}
     -- Use the unified canonical reader so own-player CI carries the same
     -- field shape as inspect-side CIs (active_spec_idx, ca_known,
     -- ca_talent_ranks, etc.). The Phase 0 readKnown/readTalentRanks paths
     -- returned partial data on Bronzebeard; readCAOForUnit("player") is the
     -- 3-arg-signature version that actually works.
-    local cao = CAO.readCAOForUnit("player") or {}
+    local cao = (isAscension and CAO.readCAOForUnit("player")) or {}
     local ci = {
         schema_version = C.SCHEMA_VERSION,
         addon_version  = C.VERSION,
+        server = profile,                  -- v0.2.0 multi-server tag
         session_id = sessionId,
         captured_at = time() * 1000,
         source = "local",
@@ -99,10 +140,16 @@ function L.buildLocalCI(sessionId)
             ca_talent_ranks = cao.ca_talent_ranks,
             ca_talent_max_ranks = cao.ca_talent_max_ranks,
             hero_build = cao.hero_build,
-            investment = CAO.readInvestment(),
+            investment = isAscension and CAO.readInvestment() or nil,
         },
         gear = Gear.readGear("player"),
-        mystic_enchants = {
+        arena_teams = arenaTeams(),
+        pet = petInfo(),
+        instance = instanceInfo(),
+    }
+
+    if isAscension then
+        ci.mystic_enchants = {
             -- Same { applied, per_slot } shape as inspect CIs. Preset-level
             -- metadata (active_preset, preset_capacity, tab_unlocked) only
             -- exists for own-player and is supplementary.
@@ -111,10 +158,12 @@ function L.buildLocalCI(sessionId)
             active_preset = Myst.readActivePreset(),
             preset_capacity = Myst.readPresetCapacity(),
             tab_unlocked = Myst.hasUnlockedTab(),
-        },
-        arena_teams = arenaTeams(),
-        pet = petInfo(),
-    }
+        }
+    elseif profile == "epoch" and ALC.Capture.EpochTalentScan then
+        -- Epoch enrichment: rich vanilla 3-tab talent shape mirroring the
+        -- inspect-side payload. Backend dispatches by ci.server.
+        ci.talents = ALC.Capture.EpochTalentScan.readInspectedTalents("player")
+    end
 
     return ci
 end
@@ -131,6 +180,7 @@ function L.buildInspectCI(unit, sessionId)
     return {
         schema_version = C.SCHEMA_VERSION,
         addon_version  = C.VERSION,
+        server = ALC.Profile or "ascension",   -- v0.2.0 multi-server tag
         session_id = sessionId,
         captured_at = time() * 1000,
         source = "inspect",
@@ -154,5 +204,6 @@ function L.buildInspectCI(unit, sessionId)
         gear = Gear.readGear(unit),
         mystic_enchants = nil,  -- inspect cannot reach
         arena_teams = arenaTeams(),
+        instance = instanceInfo(),  -- inspector and target share the same instance
     }
 end
