@@ -140,10 +140,6 @@ local function onTargetChanged()
     checkUnit("target")
 end
 
-local function onMouseover()
-    checkUnit("mouseover")
-end
-
 -- When combat drops, schedule clearing current_boss. If combat re-starts
 -- within the window (trash pull, re-pull), cancel the clear.
 local function onRegenEnabled()
@@ -175,7 +171,13 @@ end
 
 function E.start()
     ALC.RegisterEvent("PLAYER_TARGET_CHANGED", onTargetChanged)
-    ALC.RegisterEvent("UPDATE_MOUSEOVER_UNIT", onMouseover)
+    -- Removed in 0.2.0: UPDATE_MOUSEOVER_UNIT fired constantly in heavy AOE
+    -- (every brushed bat, every nameplate hover) and was redundant - the
+    -- COMBAT_LOG_EVENT_UNFILTERED handler below catches any boss within
+    -- milliseconds of any player hitting it. Mouseover added baseline
+    -- allocation pressure (UnitName + lower) for ~zero detection benefit
+    -- once combat is live. Was a meaningful contributor to mid-fight GC
+    -- pressure reported by Nace's ZG report 7976.
     ALC.RegisterEvent("PLAYER_REGEN_ENABLED", onRegenEnabled)
     ALC.RegisterEvent("PLAYER_REGEN_DISABLED", onRegenDisabled)
     ALC.RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED", function(event, ...)

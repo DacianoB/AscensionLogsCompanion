@@ -22,13 +22,103 @@ end
 -- so all the vanity-overlay capture work is pointless. Skip it to free up
 -- inspect budget for raid coverage. When transmog viewing is on (default
 -- WoW behavior), keep doing the full vanity capture path.
+--
+-- On Epoch, C_Appearance doesn't exist AND there's no transmog system at all
+-- (verified 2026-04-28 via probe: zero divergence across all slots, no
+-- C_VanityCollection / C_Wardrobe / C_Transmog / EpochTransmog globals). So
+-- we short-circuit to false on the epoch profile to skip all vanity work.
 local function transmogVisible()
+    if ALC.Profile == "epoch" then return false end
     if type(_G.C_Appearance) ~= "table"
        or type(C_Appearance.CanSeeAppearances) ~= "function" then
         return true  -- API absent; assume worst case (transmog visible)
     end
     local ok, val = pcall(C_Appearance.CanSeeAppearances)
     return (ok and val) and true or false
+end
+
+-- Forward declaration: vanityPoll calls resolveUnit which is defined below.
+-- Lua resolves locals lexically at parse time, so without this declaration
+-- the reference would resolve to global _G.resolveUnit (nil) and crash at
+-- first poll. Same gotcha that bit v0.1.7's broadcast/scheduleAnnounce; see
+-- ascension-logs-companion-developer-guide.md "Forward declarations".
+local resolveUnit
+
+-- Lightweight vanity-divergence poll. Replaces the heavy "next_scan_at = +1s"
+-- retry that re-fired full inspects. This only re-reads GetInventoryItemID
+-- (a client-side cache lookup) and patches vanity_item_id onto the cached
+-- gear entries when divergence newly appears.
+--
+-- Self-rescheduling: each poll either finds divergence and stops, or
+-- bumps vanity_check_attempts and queues another poll, up to
+-- VANITY_POLL_MAX_ATTEMPTS. Stops if config disables vanity capture or
+-- if we lose the unit.
+local function vanityPoll(guid)
+    local cfg = _G.ALC_Config
+    if cfg and cfg.vanity_capture_enabled == false then return end
+
+    local entry = ALC.Capture.InspectCache.get(guid)
+    if not entry or not entry.ci or not entry.ci.gear then return end
+    if entry.vanity_check_attempts == nil then return end  -- divergence already found, or aborted
+
+    local unit = resolveUnit(guid)
+    if not unit or not UnitExists(unit) or UnitGUID(unit) ~= guid then
+        -- Unit gone (out of range, zoned, deserted); stop polling
+        entry.vanity_check_attempts = nil
+        ALC.Capture.InspectCache.set(guid, entry)
+        return
+    end
+    if not GetInventoryItemID then return end
+
+    local newDiverges = 0
+    for _, gearEntry in ipairs(entry.ci.gear) do
+        local slot = gearEntry.slot
+        if slot then
+            local appearanceId = GetInventoryItemID(unit, slot)
+            if appearanceId and appearanceId ~= gearEntry.item_id
+               and gearEntry.vanity_item_id ~= appearanceId then
+                gearEntry.vanity_item_id = appearanceId
+                newDiverges = newDiverges + 1
+            end
+        end
+    end
+
+    if newDiverges > 0 then
+        entry.vanity_check_attempts = nil
+        entry.vanity_check_pull_id = nil
+        entry.last_success_at = time()
+        ALC.Capture.InspectCache.set(guid, entry)
+        if ALC.Capture.SnapshotPipeline and ALC.Capture.SnapshotPipeline.publishPeerInspects then
+            ALC.Capture.SnapshotPipeline.publishPeerInspects()
+        end
+        ALC.Core.Logger.debug(string.format(
+            "vanityPoll patched %d slot(s) for %s after %d attempt(s)",
+            newDiverges, UnitName(unit) or guid, entry.vanity_check_attempts or 0))
+        return
+    end
+
+    -- No divergence yet; reschedule if we have attempts left
+    local attempts = (entry.vanity_check_attempts or 0) + 1
+    if attempts < C.VANITY_POLL_MAX_ATTEMPTS then
+        entry.vanity_check_attempts = attempts
+        ALC.Capture.InspectCache.set(guid, entry)
+        if _G.C_Timer and C_Timer.After then
+            C_Timer.After(C.VANITY_POLL_INTERVAL_S, function() vanityPoll(guid) end)
+        end
+    else
+        -- Cap reached; give up. No divergence => assume no transmog.
+        entry.vanity_check_attempts = nil
+        ALC.Capture.InspectCache.set(guid, entry)
+    end
+end
+
+-- Public entry point so finalizeInspect can request a poll.
+function I.scheduleVanityPoll(guid)
+    local cfg = _G.ALC_Config
+    if cfg and cfg.vanity_capture_enabled == false then return end
+    if _G.C_Timer and C_Timer.After then
+        C_Timer.After(C.VANITY_POLL_INTERVAL_S, function() vanityPoll(guid) end)
+    end
 end
 
 local function canInspectUnit(unit)
@@ -42,7 +132,10 @@ local function canInspectUnit(unit)
        and CheckInteractDistance(unit, 4)  -- 28y Follow range
 end
 
-local function resolveUnit(guid)
+-- Assigned (not `local function`) to satisfy the forward declaration above.
+-- `local function` would shadow the forward decl with a fresh local, leaving
+-- vanityPoll's reference still pointing at global nil.
+resolveUnit = function(guid)
     if not guid then return nil end
     -- Raid roster (priority for in-raid inspects)
     for i = 1, (GetNumRaidMembers() or 0) do
@@ -214,23 +307,36 @@ local function finalizeInspect()
                 end
             end
         end
-        if ALC.Capture.MysticEnchantScan then
-            ci.mystic_enchants = {
-                applied  = ALC.Capture.MysticEnchantScan.readInspectedEnchants(unit),
-                per_slot = ALC.Capture.MysticEnchantScan.readInspectedEnchantsPerSlot(unit),
-            }
-        end
-        if ALC.Capture.CAOScan then
-            ci.specialization = ci.specialization or {}
-            local inspected = ALC.Capture.CAOScan.readCAOForUnit(unit)
-            if inspected then
-                ci.specialization.active_spec_idx     = inspected.spec_idx
-                ci.specialization.unlocked_specs      = inspected.unlocked_specs
-                ci.specialization.ca_known            = inspected.ca_known
-                ci.specialization.ca_talent_ranks     = inspected.ca_talent_ranks
-                ci.specialization.ca_talent_max_ranks = inspected.ca_talent_max_ranks
-                ci.specialization.hero_build          = inspected.hero_build
+        -- Ascension-only enrichment: mystic enchants + CAO talent state.
+        -- Both APIs are absent on Epoch (probe-confirmed), and the inspect
+        -- result events for them never fire there.
+        if ALC.Profile ~= "epoch" then
+            if ALC.Capture.MysticEnchantScan then
+                ci.mystic_enchants = {
+                    applied  = ALC.Capture.MysticEnchantScan.readInspectedEnchants(unit),
+                    per_slot = ALC.Capture.MysticEnchantScan.readInspectedEnchantsPerSlot(unit),
+                }
             end
+            if ALC.Capture.CAOScan then
+                ci.specialization = ci.specialization or {}
+                local inspected = ALC.Capture.CAOScan.readCAOForUnit(unit)
+                if inspected then
+                    ci.specialization.active_spec_idx     = inspected.spec_idx
+                    ci.specialization.unlocked_specs      = inspected.unlocked_specs
+                    ci.specialization.ca_known            = inspected.ca_known
+                    ci.specialization.ca_talent_ranks     = inspected.ca_talent_ranks
+                    ci.specialization.ca_talent_max_ranks = inspected.ca_talent_max_ranks
+                    ci.specialization.hero_build          = inspected.hero_build
+                end
+            end
+        end
+
+        -- Epoch enrichment: rich vanilla 3-tab talent shape on ci.talents.
+        -- Backend dispatches by snapshot's `server` field. The shallow
+        -- specialization.vanilla_talents (rank-only) stays populated by
+        -- LocalScan.buildInspectCI for back-compat with v0.1.x parsers.
+        if ALC.Profile == "epoch" and ALC.Capture.EpochTalentScan then
+            ci.talents = ALC.Capture.EpochTalentScan.readInspectedTalents(unit)
         end
 
         local entry = ALC.Capture.InspectCache.get(infl.guid) or {}
@@ -248,11 +354,20 @@ local function finalizeInspect()
         -- client hasn't populated GetInspectInfo data yet, readCAOForUnit
         -- returns nil and ci.specialization.active_spec_idx ends up nil.
         -- Same kind of race possible on mystic. Retry once, then accept.
-        local missingCAO    = (ci and ci.specialization
-                               and ci.specialization.active_spec_idx == nil)
-        local missingMystic = (ci and (not ci.mystic_enchants
+        --
+        -- On Epoch neither CAO nor mystic exist, so both fields will always
+        -- be missing and the partial-retry would loop forever for nothing.
+        -- Skip the partial detection entirely on epoch; talent + gear are
+        -- the entire payload and INSPECT_TALENT_READY firing means we have
+        -- both already.
+        local missingCAO, missingMystic = false, false
+        if ALC.Profile ~= "epoch" then
+            missingCAO    = (ci and ci.specialization
+                             and ci.specialization.active_spec_idx == nil)
+            missingMystic = (ci and (not ci.mystic_enchants
                                 or not ci.mystic_enchants.applied
                                 or #ci.mystic_enchants.applied == 0))
+        end
         local outcome = "success"
         if missingCAO or missingMystic then
             entry.partial_attempts = (entry.partial_attempts or 0) + 1
@@ -271,15 +386,26 @@ local function finalizeInspect()
         -- constraint absorbs any over-emission within a pull.
         scheduleNext(entry, outcome)
 
-        -- Vanity-staleness retry: when GetInventoryItemLink and GetInventoryItemID
+        -- Vanity-staleness poll: when GetInventoryItemLink and GetInventoryItemID
         -- both return the same value (no divergence), we can't distinguish
         -- "no transmog" from "API not yet ripened to expose the divergence."
         -- The transient hybrid state where divergence appears is
-        -- non-deterministic, so retry every 1s up to 10 times within each
-        -- pull. Counter resets on new pull so each fight gets fresh tries.
-        -- Skipped entirely when transmog viewing is off: with vanity
-        -- disabled there's no divergence to detect, and burning inspect
-        -- slots on retries hurts raid-coverage cold cycles.
+        -- non-deterministic, so we re-poll up to VANITY_POLL_MAX_ATTEMPTS
+        -- times at VANITY_POLL_INTERVAL_S intervals.
+        --
+        -- 0.2.0 redesign: previously this set entry.next_scan_at = +1s, which
+        -- sent the peer back through the full inspect loop tick - re-firing
+        -- NotifyInspect + C_CharacterAdvancement.InspectUnit + C_MysticEnchant.Inspect
+        -- on every retry. Three server packets × 10 retries × 24 peers per pull
+        -- was the dominant baseline-CPU and inspect-loop-budget cost reported
+        -- by Nace in ZG report 7976.
+        --
+        -- The new path uses a self-rescheduling C_Timer.After closure that ONLY
+        -- re-reads GetInventoryItemID for the cached gear slots. No server
+        -- packets, no event roundtrip, no inspect-loop tick consumed. The
+        -- deferred 8s rescan in tick() (below) already proved this read-only
+        -- pattern works for vanity ripening. Cost per poll: 19 GetInventoryItemID
+        -- calls + 19 integer compares = microseconds.
         if transmogVisible() and outcome == "success" and ci and ci.gear then
             local newPullId = tracker and tracker.getCurrentPullId() or 0
             if entry.vanity_check_pull_id ~= newPullId then
@@ -297,9 +423,8 @@ local function finalizeInspect()
             if divergedSlots > 0 then
                 entry.vanity_check_attempts = nil
                 entry.vanity_check_pull_id = nil
-            elseif (entry.vanity_check_attempts or 0) < 10 then
-                entry.vanity_check_attempts = (entry.vanity_check_attempts or 0) + 1
-                entry.next_scan_at = time() + 1
+            elseif (entry.vanity_check_attempts or 0) < C.VANITY_POLL_MAX_ATTEMPTS then
+                I.scheduleVanityPoll(infl.guid)
             end
         end
 
@@ -320,10 +445,20 @@ end
 -- Called from event handlers AND tick(). Decides if we have enough data to
 -- finalize: either all 3 events fired, OR INSPECT_TALENT_READY fired and 3s
 -- has elapsed (CA/ME packets either landed or won't).
+--
+-- On Epoch there is no CA / Mystic event flow at all, so finalize as soon
+-- as INSPECT_TALENT_READY fires. Probe (2026-04-28) measured the talent
+-- event firing reliably ~+0.22s after NotifyInspect, so this gives us a
+-- ~5x faster cycle on Epoch than the Ascension 3-event wait would.
 local function tryFinalize()
     local infl = I.inFlight
     if not infl or infl.finalized then return end
     if not infl.gotTalent then return end  -- need stock inspect first
+
+    if ALC.Profile == "epoch" then
+        finalizeInspect()
+        return
+    end
 
     if (infl.gotCA and infl.gotMystic) or (GetTime() - infl.talentAt) >= 3.0 then
         finalizeInspect()
@@ -425,13 +560,15 @@ local function tick()
     -- still didn't reliably surface divergence. Plain NotifyInspect is
     -- enough for the lighter fields.
     NotifyInspect(unit)
-    -- Ascension-specific: trigger CAO inspect packet
-    if _G.C_CharacterAdvancement and type(_G.C_CharacterAdvancement.InspectUnit) == "function" then
-        pcall(_G.C_CharacterAdvancement.InspectUnit, unit)
-    end
-    -- Ascension-specific: trigger mystic enchant inspect packet
-    if ALC.Capture.MysticEnchantScan then
-        ALC.Capture.MysticEnchantScan.requestInspect(unit)
+    if ALC.Profile ~= "epoch" then
+        -- Ascension-specific: trigger CAO inspect packet
+        if _G.C_CharacterAdvancement and type(_G.C_CharacterAdvancement.InspectUnit) == "function" then
+            pcall(_G.C_CharacterAdvancement.InspectUnit, unit)
+        end
+        -- Ascension-specific: trigger mystic enchant inspect packet
+        if ALC.Capture.MysticEnchantScan then
+            ALC.Capture.MysticEnchantScan.requestInspect(unit)
+        end
     end
     ALC.Core.Metrics.inc("inspect_sent")
 
@@ -524,28 +661,37 @@ end
 -- Event wiring
 function I.start()
     ALC.RegisterEvent("INSPECT_TALENT_READY", onInspectReady)
-    -- Ascension-specific inspect-result events. We treat any payload as
-    -- "ack received" and finalize as soon as both have fired (or 3s
-    -- after INSPECT_TALENT_READY, whichever comes first). The /alcv3
-    -- probe (2026-04-25) confirmed both events fire reliably with
-    -- result codes "CA_INSPECT_OK" / "RE_INSPECT_OK" within ~1.5s.
-    ALC.RegisterEvent("INSPECT_CHARACTER_ADVANCEMENT_RESULT", onCAResult)
-    ALC.RegisterEvent("MYSTIC_ENCHANT_INSPECT_RESULT", onMysticResult)
+    if ALC.Profile ~= "epoch" then
+        -- Ascension-specific inspect-result events. We treat any payload as
+        -- "ack received" and finalize as soon as both have fired (or 3s
+        -- after INSPECT_TALENT_READY, whichever comes first). The /alcv3
+        -- probe (2026-04-25) confirmed both events fire reliably with
+        -- result codes "CA_INSPECT_OK" / "RE_INSPECT_OK" within ~1.5s.
+        -- These events do not exist on Epoch, where INSPECT_TALENT_READY
+        -- alone carries the full payload.
+        ALC.RegisterEvent("INSPECT_CHARACTER_ADVANCEMENT_RESULT", onCAResult)
+        ALC.RegisterEvent("MYSTIC_ENCHANT_INSPECT_RESULT", onMysticResult)
+    end
     ALC.RegisterEvent("RAID_ROSTER_UPDATE", I.onRosterChange)
     ALC.RegisterEvent("PARTY_MEMBERS_CHANGED", I.onRosterChange)
 
-    -- OnUpdate-driven 2s tick
+    -- OnUpdate-driven tick. Per-profile interval: 1.0s on Ascension
+    -- (Bronzebeard-validated 24/24 at 1.0s), 0.5s on Epoch (probe-validated
+    -- 24/24 at 0.30s, 0.5s leaves margin and roughly halves cold-cycle).
+    local interval = ALC.Core.Profile.inspectIntervalSeconds()
     local accum = 0
     I.ticker = ALC.frame
     I.ticker:HookScript("OnUpdate", function(self, elapsed)
         accum = accum + elapsed
-        if accum >= C.INSPECT_MIN_INTERVAL_S then
+        if accum >= interval then
             accum = 0
             tick()
         end
     end)
 
-    ALC.Core.Logger.debug("InspectLoop started")
+    ALC.Core.Logger.debug(string.format(
+        "InspectLoop started (profile=%s, interval=%.2fs)",
+        tostring(ALC.Profile), interval))
 end
 
 -- Manual trigger for /alc inspect-now
