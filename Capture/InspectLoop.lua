@@ -669,16 +669,22 @@ local function tick()
 end
 
 function I.onRosterChange()
-    -- Purge entries for players no longer in group (raid + party)
-    local inRoster = { [UnitGUID("player")] = true }
+    -- Purge entries for players no longer in group (raid + party).
+    -- UnitGUID("player") can transiently return nil during a raid disband
+    -- (PARTY_MEMBERS_CHANGED / RAID_ROSTER_UPDATE fire mid-transition).
+    -- A nil key would throw "table index is nil" on the constructor, so
+    -- bail out and let the next event tick retry; roster state is
+    -- unreliable when even the local player unit is unreadable.
+    local pg = UnitGUID("player")
+    if not pg then return end
+
+    local inRoster = { [pg] = true }
     for i = 1, (GetNumRaidMembers() or 0) do
-        local u = "raid" .. i
-        local g = UnitGUID(u)
+        local g = UnitGUID("raid" .. i)
         if g then inRoster[g] = true end
     end
     for i = 1, (GetNumPartyMembers() or 0) do
-        local u = "party" .. i
-        local g = UnitGUID(u)
+        local g = UnitGUID("party" .. i)
         if g then inRoster[g] = true end
     end
     for guid in pairs(ALC.Capture.InspectCache.snapshot()) do
