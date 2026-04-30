@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.2.6"
+C.VERSION = "0.30.1"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
 -- parsing for talents / mystic / vanity.
@@ -64,9 +64,89 @@ C.ADDON_MSG_JOIN_CAP_S       = 10   -- first 10s after raid join
 C.ADDON_MSG_JOIN_CAP_RATE    = 2    -- 2 msg/s during login storm window
 C.HELLO_JITTER_MAX_S         = 3.0
 
--- Hijack queue
-C.HIJACK_QUEUE_MAX_CHUNKS = 400
-C.HIJACK_CHUNK_TTL_S      = 600  -- 10 min
+-- Relay queue (chunk transport via SPELL_CAST_FAILED localized fail-reason)
+C.RELAY_QUEUE_MAX_CHUNKS = 400
+C.RELAY_CHUNK_TTL_S      = 600  -- 10 min
+
+-- CLEU SPELL_CAST_FAILED arg index for the localized fail-reason text.
+-- Stock 3.3.5 puts failedType at index 12 of the COMBAT_LOG_EVENT_UNFILTERED
+-- payload. Ascension's custom client confirmed via /alcprobe failedtype-arg
+-- (validated 2026-04-30 on Bronzebeard). If a future client patch shifts
+-- args, re-run the probe and update this constant.
+C.RELAY_FAILEDTYPE_ARG_INDEX = 12
+
+-- Canonical list of SPELL_FAILED_* globals the relay rewrites during chunk
+-- transport. Ordered most-observed first (real Ascension raid logs in
+-- ascensionLogs/data/downloads). Sources for the expanded set:
+--   - Original Phase-1 starter set (38 entries; covered ~24% of fail volume)
+--   - Diff of `2026-04-30-22.53.58 WoWCombatLog.txt` non-ALC SPELL_CAST_FAILED
+--     reasons against /alcprobe dump-failreasons output (live _G snapshot of
+--     285 SPELL_FAILED_* string globals on enUS Bronzebeard 2026-04-30):
+--       SPELL_FAILED_INTERRUPTED_COMBAT  ("Interrupted")
+--       SPELL_FAILED_ONLY_STEALTHED      ("You must be in stealth mode.")
+--       SPELL_FAILED_NOT_HERE            ("You can't use that here.")
+--       SPELL_FAILED_MOVING              ("Can't do that while moving")
+--       SPELL_FAILED_CUSTOM_ERROR_32     ("Must be in Cat Form")
+--
+-- IMPORTANT: three high-volume strings on this client come from C-side
+-- formatting and have NO matching _G global, so the relay cannot carry chunks
+-- on those events:
+--   - "Not enough rage"                 (414 events / 22-min log; bear/warrior)
+--   - "Not enough energy"               (352 events; rogue/cat-druid)
+--   - "Can't do that while horrified"   (73 events; Ascension custom mechanic)
+-- These account for ~76% of chunk-loss events. The structural fix is the
+-- landed-evidence gating in SpellFailedRelay.onSpellCastFailed, which uses
+-- RELAY_FAILEDTYPE_ARG_INDEX above to read failedType and confirm the prior
+-- chunk landed via CI_SENTINEL_PREFIX match before advancing the queue.
+-- Globals list expansion below is a complement, not a substitute, for the
+-- gating fix.
+C.RELAY_FAIL_GLOBALS = {
+    -- Tier 1: high-frequency (original Phase-1 set)
+    "SPELL_FAILED_NOT_READY",                -- "Not yet recovered" (cooldown spam; dominant)
+    "SPELL_FAILED_INTERRUPTED",
+    "SPELL_FAILED_INTERRUPTED_COMBAT",       -- added 0.2.7: same "Interrupted" string, alt code path
+    "SPELL_FAILED_OUT_OF_RANGE",
+    "SPELL_FAILED_LINE_OF_SIGHT",
+    "SPELL_FAILED_INVALID_TARGET",
+    "SPELL_FAILED_BAD_TARGETS",
+    "SPELL_FAILED_NO_TARGETS",
+    "SPELL_FAILED_TARGETS_DEAD",
+    "SPELL_FAILED_CASTER_DEAD",
+    "SPELL_FAILED_UNIT_NOT_INFRONT",
+    "SPELL_FAILED_NOT_INFRONT",
+    "SPELL_FAILED_NOT_BEHIND",
+    "SPELL_FAILED_TOO_CLOSE",
+    "SPELL_FAILED_AURA_BOUNCED",
+    "SPELL_FAILED_AFFECTING_COMBAT",
+    "SPELL_FAILED_ALREADY_AT_FULL_HEALTH",
+    "SPELL_FAILED_ALREADY_AT_FULL_POWER",
+    "SPELL_FAILED_CASTER_AURASTATE",
+    "SPELL_FAILED_STUNNED",
+    "SPELL_FAILED_CHARMED",
+    "SPELL_FAILED_CONFUSED",
+    "SPELL_FAILED_FLEEING",
+    "SPELL_FAILED_PACIFIED",
+    "SPELL_FAILED_SILENCED",
+    "SPELL_FAILED_SPELL_IN_PROGRESS",
+    "SPELL_FAILED_IMMUNE",
+    "SPELL_FAILED_NO_COMBO_POINTS",
+    "SPELL_FAILED_BAD_IMPLICIT_TARGETS",
+    "SPELL_FAILED_CANT_BE_CHARMED",
+    "SPELL_FAILED_CANT_BE_DISENCHANTED",
+    "SPELL_FAILED_CANT_BE_MILLED",
+    "SPELL_FAILED_CANT_BE_PROSPECTED",
+    "SPELL_FAILED_CANT_CAST_ON_TAPPED",
+    "SPELL_FAILED_LOW_CASTLEVEL",
+    "SPELL_FAILED_ITEM_NOT_READY",
+    "SPELL_FAILED_TOO_MANY_OF_ITEM",
+    "SPELL_FAILED_MOREPOWERFULSPELLACTIVE",
+
+    -- Tier 2: added 0.2.7 from leak-tally diff
+    "SPELL_FAILED_ONLY_STEALTHED",           -- "You must be in stealth mode."
+    "SPELL_FAILED_NOT_HERE",                 -- "You can't use that here."
+    "SPELL_FAILED_MOVING",                   -- "Can't do that while moving"
+    "SPELL_FAILED_CUSTOM_ERROR_32",          -- "Must be in Cat Form" (Ascension-specific slot)
+}
 
 -- Chunking
 -- Empirically validated 2026-04-24 on Ascension 3.3.5: 800-char fail-reason

@@ -1,11 +1,12 @@
 -- Capture/SnapshotPipeline.lua
 -- Connective tissue between LocalScan (which builds CI structs) and
--- SpellFailedHijack (which injects chunks into the combat log).
+-- SpellFailedRelay (which carries chunks through the combat log on
+-- SPELL_CAST_FAILED events).
 --
 -- On any event that may have changed the player's CI (login, equipment
 -- change, talent / spec change, mystic enchant change), rebuild the CI,
 -- content-hash compare against the last published version, and if
--- different: serialize, chunk, enqueue to the hijack ring buffer.
+-- different: serialize, chunk, enqueue to the relay ring buffer.
 --
 -- Also enqueues peer CIs from the InspectCache (captured by our
 -- inspect loop) so a single logger broadcasts the entire raid's data
@@ -78,7 +79,7 @@ local function chunkPayload(sessionId, guid, b64)
     return chunks
 end
 
--- Serialize a CI struct into base64-safe chunks ready for hijack injection.
+-- Serialize a CI struct into base64-safe chunks ready for relay injection.
 local function serializeCIToChunks(ci)
     if not ci or not ci.session_id or not ci.captured_by_guid then return nil end
     local compressed = ALC.Core.Serialize.serializeCI(ci)
@@ -139,7 +140,7 @@ function P.publishOwnIfChanged()
     end
 
     for _, chunk in ipairs(chunks) do
-        ALC.Transport.SpellFailedHijack.enqueue(chunk)
+        ALC.Transport.SpellFailedRelay.enqueue(chunk)
     end
     ALC.Core.Logger.debug("Own CI enqueued: " .. #chunks .. " chunks (serializer=" .. ALC.Core.Serialize.activePath() .. ", hash " .. hash .. ")")
 end
@@ -182,7 +183,7 @@ function P.publishPeerInspects()
                 local chunks = serializeCIToChunks(entry.ci)
                 if chunks then
                     for _, chunk in ipairs(chunks) do
-                        ALC.Transport.SpellFailedHijack.enqueue(chunk)
+                        ALC.Transport.SpellFailedRelay.enqueue(chunk)
                     end
                     count = count + #chunks
                 end
@@ -256,7 +257,7 @@ local function drainDeferQueue()
             local chunks = serializeCIToChunks(item.entry.ci)
             if chunks then
                 for _, chunk in ipairs(chunks) do
-                    ALC.Transport.SpellFailedHijack.enqueue(chunk)
+                    ALC.Transport.SpellFailedRelay.enqueue(chunk)
                 end
                 drained = drained + #chunks
             end
@@ -321,9 +322,9 @@ function P.start()
         -- frames instead of one. publishOwnIfChanged still runs synchronously
         -- (one peer, cheap, hash-deduped); peer compression is the cost
         -- that needs spreading.
-        if ALC.Transport.SpellFailedHijack
-           and ALC.Transport.SpellFailedHijack.clearQueue then
-            ALC.Transport.SpellFailedHijack.clearQueue()
+        if ALC.Transport.SpellFailedRelay
+           and ALC.Transport.SpellFailedRelay.clearQueue then
+            ALC.Transport.SpellFailedRelay.clearQueue()
         end
         P.lastPeerEnqueued = {}
         P.publishAllDeferred()

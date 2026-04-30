@@ -67,7 +67,7 @@ end
 function M.report(logger)
     local c = M.counters
     local log = logger or ALC.Core.Logger.info
-    log("Hijack: " .. c.chunks_flushed .. " flushed / " .. c.chunks_queued .. " queued")
+    log("Relay: " .. c.chunks_flushed .. " flushed / " .. c.chunks_queued .. " queued")
     if c.chunks_dropped_ttl > 0 or c.chunks_dropped_overflow > 0 then
         log("  drops: " .. c.chunks_dropped_ttl .. " TTL, " .. c.chunks_dropped_overflow .. " overflow")
     end

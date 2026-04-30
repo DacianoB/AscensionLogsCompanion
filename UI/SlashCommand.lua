@@ -87,9 +87,9 @@ SlashCmdList["ALC"] = function(msg)
     elseif cmd == "inspect-now" then
         ALC.Capture.InspectLoop.inspectNow("target")
 
-    elseif cmd == "hijack" and parts[2] == "off" then
-        ALC.Transport.SpellFailedHijack.disable()
-        L.info("Hijack disabled. /reload to re-enable.")
+    elseif cmd == "relay" and parts[2] == "off" then
+        ALC.Transport.SpellFailedRelay.disable()
+        L.info("Relay disabled. /reload to re-enable.")
 
     elseif cmd == "zone" then
         local sub = parts[2]

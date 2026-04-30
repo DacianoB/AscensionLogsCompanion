@@ -23,7 +23,7 @@ local function boot()
     -- Rehydrate inspect cache
     ALC.Capture.InspectCache.rehydrate()
 
-    -- Start subsystems (order matters: hijack must be ready to receive
+    -- Start subsystems (order matters: the relay must be ready to receive
     -- chunks before SnapshotPipeline starts producing them).
     -- Each wrapped in pcall so one bad module doesn't break the whole addon.
     local function safeStart(name, mod)
@@ -42,7 +42,7 @@ local function boot()
     safeStart("ZoneMonitor", ALC.Zone.ZoneMonitor)
     safeStart("EncounterDetector", ALC.Parser.EncounterDetector)
     safeStart("EncounterTracker", ALC.Capture.EncounterTracker)
-    safeStart("SpellFailedHijack", ALC.Transport.SpellFailedHijack)
+    safeStart("SpellFailedRelay", ALC.Transport.SpellFailedRelay)
     safeStart("AddonChannel", ALC.Transport.AddonChannel)
     safeStart("VersionCheck", ALC.Transport.VersionCheck)
     safeStart("InspectLoop", ALC.Capture.InspectLoop)

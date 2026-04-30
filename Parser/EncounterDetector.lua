@@ -21,8 +21,8 @@ local function onRegenDisabled()
         E.inEncounter = true
         E.encounterStartTs = time() * 1000
         ALC.Core.Logger.debug("Encounter start (regen proxy)")
-        if ALC.Transport.SpellFailedHijack then
-            ALC.Transport.SpellFailedHijack.reevaluate()
+        if ALC.Transport.SpellFailedRelay then
+            ALC.Transport.SpellFailedRelay.reevaluate()
         end
     end
 end

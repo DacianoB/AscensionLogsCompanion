@@ -1,5 +1,5 @@
 -- Core/Queue.lua
--- Simple ring buffer + priority queue. Used by the hijack rotation and the
+-- Simple ring buffer + priority queue. Used by the relay rotation and the
 -- inspect scheduler. Constant-time push/pop/advance only.
 
 local ALC = _G.ALC
@@ -7,7 +7,7 @@ local Q = {}
 ALC.Core.Queue = Q
 
 --------------------------------------------------------------------------------
--- Ring buffer (hijack chunk rotation)
+-- Ring buffer (relay chunk rotation)
 --------------------------------------------------------------------------------
 function Q.newRing(capacity)
     return {

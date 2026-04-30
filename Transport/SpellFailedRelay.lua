@@ -1,66 +1,38 @@
--- Transport/SpellFailedHijack.lua
--- LegacyPlayersV3-style SPELL_FAILED_* localization override for injecting
--- CI chunks into WoWCombatLog.txt.
+-- Transport/SpellFailedRelay.lua
+-- LegacyPlayersV3-style SPELL_FAILED_* localization rewrite that carries
+-- snapshot CI chunks through WoWCombatLog.txt on the back of SPELL_CAST_FAILED
+-- events.
 --
 -- Scope-tightened: only active when LoggingCombat + in raid + in combat +
 -- user hasn't disabled via config. Originals captured at init and restored
 -- on scope exit. UIErrorsFrame hook suppresses sentinel strings from
 -- leaking into the red-text overlay.
+--
+-- Landed-evidence gating (added 0.30.1): the queue head only advances when
+-- the next SPELL_CAST_FAILED's failedType arg starts with CI_SENTINEL_PREFIX,
+-- which proves the previously-applied chunk was the string the engine read
+-- and therefore landed in WoWCombatLog.txt. If failedType is anything else
+-- (uncovered Lua global, or a C-side string like "Not enough rage" /
+-- "Not enough energy" that bypasses _G entirely), the same chunk stays at
+-- the head and gets re-applied on the next event. Prevents the silent
+-- chunk-loss class observed on bear druids in 2026-04-30-22.53.58.
 
 local ALC = _G.ALC
 local H = {}
-ALC.Transport.SpellFailedHijack = H
+ALC.Transport.SpellFailedRelay = H
 
 local C = ALC.Core.Constants
 
--- Starter global list for Phase 1. Full ~170 list arrives in Phase 2.
--- Ordered with the most-observed fail reasons first (measured from real
--- Ascension raid logs in ascensionLogs/data/downloads: SPELL_FAILED_NOT_READY
--- dominates because of cooldown spam, followed by interrupt/range/LoS).
-H.GLOBALS = {
-    "SPELL_FAILED_NOT_READY",           -- "Not yet recovered" - most common
-    "SPELL_FAILED_INTERRUPTED",
-    "SPELL_FAILED_OUT_OF_RANGE",
-    "SPELL_FAILED_LINE_OF_SIGHT",
-    "SPELL_FAILED_INVALID_TARGET",
-    "SPELL_FAILED_BAD_TARGETS",
-    "SPELL_FAILED_NO_TARGETS",
-    "SPELL_FAILED_TARGETS_DEAD",
-    "SPELL_FAILED_CASTER_DEAD",
-    "SPELL_FAILED_UNIT_NOT_INFRONT",
-    "SPELL_FAILED_NOT_INFRONT",
-    "SPELL_FAILED_NOT_BEHIND",
-    "SPELL_FAILED_TOO_CLOSE",
-    "SPELL_FAILED_AURA_BOUNCED",
-    "SPELL_FAILED_AFFECTING_COMBAT",
-    "SPELL_FAILED_ALREADY_AT_FULL_HEALTH",
-    "SPELL_FAILED_ALREADY_AT_FULL_POWER",
-    "SPELL_FAILED_CASTER_AURASTATE",
-    "SPELL_FAILED_STUNNED",
-    "SPELL_FAILED_CHARMED",
-    "SPELL_FAILED_CONFUSED",
-    "SPELL_FAILED_FLEEING",
-    "SPELL_FAILED_PACIFIED",
-    "SPELL_FAILED_SILENCED",
-    "SPELL_FAILED_SPELL_IN_PROGRESS",
-    "SPELL_FAILED_IMMUNE",
-    "SPELL_FAILED_NO_COMBO_POINTS",
-    "SPELL_FAILED_BAD_IMPLICIT_TARGETS",
-    "SPELL_FAILED_CANT_BE_CHARMED",
-    "SPELL_FAILED_CANT_BE_DISENCHANTED",
-    "SPELL_FAILED_CANT_BE_MILLED",
-    "SPELL_FAILED_CANT_BE_PROSPECTED",
-    "SPELL_FAILED_CANT_CAST_ON_TAPPED",
-    "SPELL_FAILED_LOW_CASTLEVEL",
-    "SPELL_FAILED_ITEM_NOT_READY",      -- "Item is not ready yet"
-    "SPELL_FAILED_TOO_MANY_OF_ITEM",    -- "You have too many of that item already"
-    "SPELL_FAILED_MOREPOWERFULSPELLACTIVE",  -- "A more powerful spell is already active"
-}
+-- Source of truth for the rewrite set lives in Core/Constants.lua
+-- (C.RELAY_FAIL_GLOBALS). Ordered most-observed first to maximize the
+-- chance any given SPELL_CAST_FAILED reads one of our values.
+H.GLOBALS = C.RELAY_FAIL_GLOBALS
 
 H.originals = nil   -- captured at init, { [globalName] = originalValue }
 H.active = false
 H.queue = nil       -- ring buffer of chunks
 H.queueIdx = 1
+H.pendingChunk = nil  -- chunk currently sitting in the rewritten globals; cleared on landed evidence
 
 local function ensureOriginalsCaptured()
     if H.originals then return end
@@ -74,7 +46,7 @@ local function applyChunk(chunk)
     for _, g in ipairs(H.GLOBALS) do
         local ok = pcall(function() setglobal(g, chunk) end)
         if not ok then
-            ALC.Core.Logger.warn("Hijack: setglobal failed for " .. g)
+            ALC.Core.Logger.warn("Relay: setglobal failed for " .. g)
         end
     end
 end
@@ -88,7 +60,7 @@ end
 
 function H.enqueue(chunk)
     if not H.queue then
-        H.queue = ALC.Core.Queue.newRing(C.HIJACK_QUEUE_MAX_CHUNKS)
+        H.queue = ALC.Core.Queue.newRing(C.RELAY_QUEUE_MAX_CHUNKS)
     end
     local sizeBefore = H.queue.size
     ALC.Core.Queue.ringPush(H.queue, { chunk = chunk, pushed_at = time() })
@@ -102,9 +74,10 @@ end
 
 function H.clearQueue()
     if H.queue then ALC.Core.Queue.ringClear(H.queue) end
+    H.pendingChunk = nil
 end
 
--- Scope check: should hijack be active right now?
+-- Scope check: should the relay be active right now?
 local function shouldBeActive()
     if not _G.ALC_Config or not ALC_Config.hijack_enabled then return false end
     if not LoggingCombat or not LoggingCombat() then return false end
@@ -116,31 +89,58 @@ local function shouldBeActive()
     return true
 end
 
--- Called on every SPELL_CAST_FAILED sub-event in COMBAT_LOG_EVENT_UNFILTERED
-function H.onSpellCastFailed()
+-- Called on every SPELL_CAST_FAILED sub-event in COMBAT_LOG_EVENT_UNFILTERED.
+-- failedType is the localized fail-reason string the engine read for THIS
+-- event (CLEU arg at C.RELAY_FAILEDTYPE_ARG_INDEX). If it starts with our
+-- sentinel prefix, the previously-applied chunk made it into the log line
+-- and the queue head can safely advance. Otherwise the chunk was eaten by
+-- an uncovered Lua global or a C-side fail string, so we keep the same
+-- head entry and re-apply it on the next event.
+function H.onSpellCastFailed(failedType)
     if not H.active then return end
-    if not H.queue or H.queue.size == 0 then return end
+    if not H.queue or H.queue.size == 0 then
+        H.pendingChunk = nil
+        return
+    end
 
-    -- Evict stale chunks
+    -- Evict stale chunks at the head
     local nowSec = time()
-    local ttl = C.HIJACK_CHUNK_TTL_S
+    local ttl = C.RELAY_CHUNK_TTL_S
     while H.queue.size > 0 do
         local head = ALC.Core.Queue.ringPeek(H.queue, 0)
         if head and (nowSec - head.pushed_at) > ttl then
             ALC.Core.Queue.ringAdvance(H.queue)
             ALC.Core.Metrics.inc("chunks_dropped_ttl")
+            H.pendingChunk = nil
         else
             break
         end
     end
     if H.queue.size == 0 then return end
 
-    -- Apply next chunk; the one we just applied for this event already hit the log
+    -- Landed-evidence check: did the prior chunk make it into the log?
+    local prefix = C.CI_SENTINEL_PREFIX
+    local landed = H.pendingChunk
+        and type(failedType) == "string"
+        and failedType:sub(1, #prefix) == prefix
+
+    if landed then
+        ALC.Core.Queue.ringAdvance(H.queue)
+        ALC.Core.Metrics.inc("chunks_landed")
+        H.pendingChunk = nil
+        if H.queue.size == 0 then return end
+    elseif H.pendingChunk then
+        -- Prior chunk was eaten (uncovered global or C-side fail string).
+        -- Leave the head in place so the same chunk gets another shot.
+        ALC.Core.Metrics.inc("chunks_re_applied")
+    end
+
+    -- Apply the (still-)current head; idempotent re-applies are cheap and
+    -- keep the rewritten globals fresh in case anything else touched them.
     local entry = ALC.Core.Queue.ringPeek(H.queue, 0)
     if entry then
         applyChunk(entry.chunk)
-        -- Rotate: advance head so next SPELL_CAST_FAILED uses the next chunk
-        ALC.Core.Queue.ringAdvance(H.queue)
+        H.pendingChunk = entry.chunk
         ALC.Core.Metrics.mark_flush()
     end
 end
@@ -152,12 +152,13 @@ function H.reevaluate()
         ensureOriginalsCaptured()
         H.active = true
         ALC.Core.Metrics.inc("hijack_activations")
-        ALC.Core.Logger.debug("Hijack activated")
+        ALC.Core.Logger.debug("Relay activated")
     elseif not want and H.active then
         restoreAll()
         H.active = false
+        H.pendingChunk = nil
         ALC.Core.Metrics.inc("hijack_deactivations")
-        ALC.Core.Logger.debug("Hijack deactivated")
+        ALC.Core.Logger.debug("Relay deactivated")
     end
 end
 
@@ -184,24 +185,29 @@ function H.start()
         -- Do NOT clear the queue here. Short pulls (5-10s of trash) routinely
         -- end with undrained chunks; clearing would drop them. Instead let
         -- undrained chunks roll into the next combat, where TTL eviction
-        -- (HIJACK_CHUNK_TTL_S) lazily evicts stale entries at the head and
-        -- the 200-chunk ring cap bounds growth. lastPeerEnqueued dedup
+        -- (RELAY_CHUNK_TTL_S) lazily evicts stale entries at the head and
+        -- the 400-chunk ring cap bounds growth. lastPeerEnqueued dedup
         -- prevents re-enqueueing the same capture.
     end)
     ALC.RegisterEvent("ZONE_CHANGED_NEW_AREA", H.reevaluate)
     ALC.RegisterEvent("PLAYER_ENTERING_WORLD", H.reevaluate)
     ALC.RegisterEvent("PLAYER_LOGOUT", function() restoreAll() end)
 
-    -- Hook into combat log event for SPELL_CAST_FAILED triggering
+    -- Hook into combat log event for SPELL_CAST_FAILED triggering. Pull
+    -- failedType from the documented CLEU arg index so the gating check
+    -- can compare it against CI_SENTINEL_PREFIX.
     ALC.RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED", function(event, ...)
         local _, subEvent = ...
         if subEvent == "SPELL_CAST_FAILED" then
-            H.onSpellCastFailed()
+            local failedType = select(C.RELAY_FAILEDTYPE_ARG_INDEX, ...)
+            H.onSpellCastFailed(failedType)
         end
     end)
 end
 
--- User kill switch
+-- User kill switch. Note: the SavedVariable key stays `hijack_enabled` to
+-- preserve user configs across the rename; only the module surface was
+-- renamed to "Relay" in 0.30.1.
 function H.disable()
     _G.ALC_Config.hijack_enabled = false
     H.reevaluate()
