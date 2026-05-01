@@ -33,6 +33,7 @@ H.active = false
 H.queue = nil       -- ring buffer of chunks
 H.queueIdx = 1
 H.pendingChunk = nil  -- chunk currently sitting in the rewritten globals; cleared on landed evidence
+H.globalsDirty = false  -- true when applyChunk has overwritten globals; cleared by restoreAll
 
 local function ensureOriginalsCaptured()
     if H.originals then return end
@@ -49,12 +50,37 @@ local function applyChunk(chunk)
             ALC.Core.Logger.warn("Relay: setglobal failed for " .. g)
         end
     end
+    H.globalsDirty = true
 end
 
 local function restoreAll()
     if not H.originals then return end
     for g, orig in pairs(H.originals) do
         pcall(function() setglobal(g, orig) end)
+    end
+    H.globalsDirty = false
+end
+
+-- Eager-restore (added 0.30.3): when the queue empties between CI flushes,
+-- revert SPELL_FAILED_* globals to originals so chunks don't linger in
+-- covered globals between snapshots. Two motivations:
+--   1. Lingering chunks were re-read into WoWCombatLog.txt on every
+--      subsequent SPELL_CAST_FAILED that hit a covered failedType,
+--      duplicating the same chunk content for several seconds after a
+--      flush completed (parser PRD §6.3 edge case).
+--   2. On Ascension's secure auto-cast / hold-to-cast code path, secure
+--      reads of a covered global with our chunk payload propagate taint
+--      to the engine's secure execution context. Bear druids mashing
+--      Swipe / Mangle / Maul through cooldowns reproduced repeated
+--      "tainted the call of the secure function 'UNKNOWN()'" popups
+--      until queue drained naturally on combat-end / zone-change.
+-- Eager-restore shrinks the taint exposure window from "all-of-combat
+-- after the first CI" down to "duration of an in-progress flush".
+local function ensureClean()
+    if H.globalsDirty then
+        restoreAll()
+        H.pendingChunk = nil
+        ALC.Core.Metrics.inc("eager_restores")
     end
 end
 
@@ -100,6 +126,7 @@ function H.onSpellCastFailed(failedType)
     if not H.active then return end
     if not H.queue or H.queue.size == 0 then
         H.pendingChunk = nil
+        ensureClean()
         return
     end
 
@@ -116,7 +143,10 @@ function H.onSpellCastFailed(failedType)
             break
         end
     end
-    if H.queue.size == 0 then return end
+    if H.queue.size == 0 then
+        ensureClean()
+        return
+    end
 
     -- Landed-evidence check: did the prior chunk make it into the log?
     local prefix = C.CI_SENTINEL_PREFIX
@@ -128,7 +158,10 @@ function H.onSpellCastFailed(failedType)
         ALC.Core.Queue.ringAdvance(H.queue)
         ALC.Core.Metrics.inc("chunks_landed")
         H.pendingChunk = nil
-        if H.queue.size == 0 then return end
+        if H.queue.size == 0 then
+            ensureClean()
+            return
+        end
     elseif H.pendingChunk then
         -- Prior chunk was eaten (uncovered global or C-side fail string).
         -- Leave the head in place so the same chunk gets another shot.
