@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.30.3"
+C.VERSION = "0.30.4"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
 -- parsing for talents / mystic / vanity.
@@ -20,7 +20,15 @@ C.VERSION = "0.30.3"
 -- entirely was reverted before broad release; that path also bumped schema
 -- to 4 but with a different shape, so users who briefly ran 0.3.0 should
 -- expect a clean inspect cache repopulation regardless.)
-C.SCHEMA_VERSION = 4
+-- Bumped to 5 in 0.30.4: ci.talents (Epoch path) now ships both spec slots
+-- as `{ talent_groups = { [1]={tabs}, [2]={tabs} }, active_group = N }`,
+-- with talents keyed by the game's actual talent index instead of insertion
+-- order. Pre-v5 Epoch captures only read slot 1 by default and silently
+-- mis-attributed any character whose active spec was in slot 2 (root cause
+-- for Themeatman / Saws looking like Arms while raiding as Fury). Forces an
+-- inspect-cache wipe on first 0.30.4 boot via InspectCache.rehydrate's
+-- schema guard.
+C.SCHEMA_VERSION = 5
 
 -- Addon channel
 C.ADDON_PREFIX = "ALC"
