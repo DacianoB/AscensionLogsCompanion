@@ -65,7 +65,13 @@ function E.readInspectedTalents(unit)
         local tabs = {}
         for tab = 1, nTabs do
             local name, _, points = GetTalentTabInfo(tab, isInspect, false, group)
-            local nTalents = GetNumTalents(tab) or 0
+            -- isInspect must be passed to GetNumTalents too, otherwise the
+            -- count comes from the LOGGER's class for that tab number, not
+            -- the inspected unit's. On a warrior logger inspecting a warlock,
+            -- the missing flag truncates Demonology at index 20 instead of
+            -- 22, dropping Demonic Tactics + Summon Felguard. Same shape on
+            -- a warrior inspecting a shaman drops Shamanistic Rage.
+            local nTalents = GetNumTalents(tab, isInspect) or 0
             local talents = {}
             for i = 1, nTalents do
                 local tname, _, _, _, rank, maxRank =
@@ -103,4 +109,46 @@ function E.readInspectedTalents(unit)
         talent_groups = groups,
         active_group  = activeGroup,
     }
+end
+
+-- Tab-name lookup per class, used to detect when WoW's global inspect
+-- buffer was overwritten by another NotifyInspect (peer addon, manual
+-- right-click inspect by the user, raid frame mouseover) between our
+-- NotifyInspect and our handler reading the buffer.
+--
+-- GetTalentInfo(tab, i, true, ...) reads from a single global "last
+-- inspected" target buffer in 3.3.5 vanilla — there's no per-unit
+-- talent cache exposed to Lua. If the buffer was clobbered, the
+-- captured tab names will belong to a different class than the unit
+-- token reports via UnitClass(unit). That mismatch is the only
+-- in-process signal available; check it before trusting the read.
+local CLASS_TAB_NAMES = {
+    WARRIOR = { Arms = true, Fury = true, Protection = true },
+    PALADIN = { Holy = true, Protection = true, Retribution = true },
+    HUNTER  = { ["Beast Mastery"] = true, Marksmanship = true, Survival = true },
+    ROGUE   = { Assassination = true, Combat = true, Subtlety = true },
+    PRIEST  = { Discipline = true, Holy = true, Shadow = true },
+    SHAMAN  = { Elemental = true, Enhancement = true, Restoration = true },
+    MAGE    = { Arcane = true, Fire = true, Frost = true },
+    WARLOCK = { Affliction = true, Demonology = true, Destruction = true },
+    DRUID   = { Balance = true, ["Feral Combat"] = true, Restoration = true },
+}
+
+-- Returns true if the snapshot's tab names all belong to the expected
+-- class. Returns false if any tab name doesn't match (buffer-race
+-- contamination), or if the snapshot is structurally incomplete.
+-- Unknown class tokens (future-proofing for new classes) pass through
+-- as valid so we never silently drop legitimate captures.
+function E.validateForClass(snapshot, classToken)
+    if not classToken then return false end
+    local expected = CLASS_TAB_NAMES[classToken]
+    if not expected then return true end
+    local g1 = snapshot and snapshot.talent_groups and snapshot.talent_groups[1]
+    local tabs = g1 and g1.tabs
+    if not tabs then return false end
+    for i = 1, 3 do
+        local n = tabs[i] and tabs[i].name
+        if not n or not expected[n] then return false end
+    end
+    return true
 end

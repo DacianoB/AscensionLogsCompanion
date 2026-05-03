@@ -327,11 +327,15 @@ local function finalizeInspect()
         end
 
         -- Epoch enrichment: rich vanilla 3-tab talent shape on ci.talents.
+        -- The snapshot was captured synchronously in onInspectReady (above)
+        -- to avoid the global-inspect-buffer race; we just copy it across
+        -- here. nil here means buffer-race rejection in onInspectReady;
+        -- the missingTalents check below converts that into a partial-retry.
         -- Backend dispatches by snapshot's `server` field. The shallow
         -- specialization.vanilla_talents (rank-only) stays populated by
         -- LocalScan.buildInspectCI for back-compat with v0.1.x parsers.
-        if ALC.Profile == "epoch" and ALC.Capture.EpochTalentScan then
-            ci.talents = ALC.Capture.EpochTalentScan.readInspectedTalents(unit)
+        if ALC.Profile == "epoch" then
+            ci.talents = infl.talentSnapshot
         end
 
         local entry = ALC.Capture.InspectCache.get(infl.guid) or {}
@@ -352,11 +356,13 @@ local function finalizeInspect()
         --
         -- On Epoch neither CAO nor mystic exist, so both fields will always
         -- be missing and the partial-retry would loop forever for nothing.
-        -- Skip the partial detection entirely on epoch; talent + gear are
-        -- the entire payload and INSPECT_TALENT_READY firing means we have
-        -- both already.
-        local missingCAO, missingMystic = false, false
-        if ALC.Profile ~= "epoch" then
+        -- Skip CAO/Mystic partial detection entirely on epoch — but DO
+        -- check missingTalents, since onInspectReady leaves talentSnapshot
+        -- nil whenever the global-inspect-buffer race was detected.
+        local missingCAO, missingMystic, missingTalents = false, false, false
+        if ALC.Profile == "epoch" then
+            missingTalents = (ci and ci.talents == nil) and true or false
+        else
             missingCAO    = (ci and ci.specialization
                              and ci.specialization.active_spec_idx == nil)
             missingMystic = (ci and (not ci.mystic_enchants
@@ -364,7 +370,7 @@ local function finalizeInspect()
                                 or #ci.mystic_enchants.applied == 0))
         end
         local outcome = "success"
-        if missingCAO or missingMystic then
+        if missingCAO or missingMystic or missingTalents then
             entry.partial_attempts = (entry.partial_attempts or 0) + 1
             if entry.partial_attempts <= 1 then
                 outcome = "partial"
@@ -430,7 +436,9 @@ local function finalizeInspect()
             tostring(entry.captured_for_boss),
             tostring(infl.gotCA), tostring(infl.gotMystic),
             cycleTime, outcome,
-            (missingCAO and " missingCAO" or "") .. (missingMystic and " missingMystic" or "")))
+            (missingCAO and " missingCAO" or "")
+              .. (missingMystic and " missingMystic" or "")
+              .. (missingTalents and " missingTalents" or "")))
     end
 
     ClearInspectPlayer()
@@ -481,6 +489,44 @@ local function onInspectReady()
     local infl = I.inFlight
     if not infl then return end
     local sessionId = _G.ALC_LocalState and _G.ALC_LocalState.session_id
+
+    -- EPOCH ONLY: snapshot talents synchronously NOW, while WoW's global
+    -- inspect buffer is freshest (this event just fired). The +400ms gear
+    -- flip delay below leaves a window in which any other NotifyInspect
+    -- (peer addon, raid frame mouseover, user right-click inspect) would
+    -- clobber the buffer, and a delayed read of GetTalentInfo would return
+    -- the wrong player's data. We park the validated snapshot on the
+    -- in-flight record; finalizeInspect copies it into ci.talents instead
+    -- of re-reading a possibly-stale buffer.
+    --
+    -- Validation: tab names must match the inspected unit's class. WoW
+    -- 3.3.5 has no per-unit talent cache exposed to Lua; tab-name
+    -- mismatch is the only in-process signal that the buffer was clobbered.
+    --
+    -- BB profile is unaffected: it uses C_CharacterAdvancement.InspectUnit,
+    -- which is per-unit-keyed in the client and not subject to this race.
+    if ALC.Profile == "epoch"
+       and ALC.Capture.EpochTalentScan
+       and not infl.talentSnapshot then
+        local readUnit = resolveUnit(infl.guid)
+        if readUnit and UnitGUID(readUnit) == infl.guid then
+            local snap = ALC.Capture.EpochTalentScan.readInspectedTalents(readUnit)
+            local _, classToken = UnitClass(readUnit)
+            if snap and ALC.Capture.EpochTalentScan.validateForClass(snap, classToken) then
+                infl.talentSnapshot = snap
+            else
+                ALC.Core.Metrics.inc("inspect_talent_buffer_race")
+                local got = "?"
+                if snap and snap.talent_groups and snap.talent_groups[1]
+                   and snap.talent_groups[1].tabs and snap.talent_groups[1].tabs[1] then
+                    got = snap.talent_groups[1].tabs[1].name or "?"
+                end
+                ALC.Core.Logger.debug(string.format(
+                    "Talent buffer race: %s expected class=%s got tab1=%s",
+                    UnitName(readUnit) or infl.guid, tostring(classToken), got))
+            end
+        end
+    end
 
     local doRead = function()
         -- Re-validate in-flight state in case the timer fired after a
