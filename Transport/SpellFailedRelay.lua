@@ -209,8 +209,62 @@ local function installUIErrorSuppressor()
     end
 end
 
+-- Taint error suppressor (added 0.40.0): silently drop the
+-- "AddOn 'AscensionLogsCompanion' tainted the call of the secure function
+-- 'UNKNOWN()'" Lua errors that fire when a hold-to-cast user (e.g. bear
+-- druids hammering Maul/Swipe through cooldowns) reads a chunk-loaded
+-- SPELL_FAILED_* global through the secure auto-cast path. The taint is
+-- inherent to the CLEU-hijack transport and eager-restore already shrinks
+-- the exposure window to the in-progress flush duration; this hook just
+-- hides the cosmetic ScriptErrorsFrame popup. Chunks still land in
+-- WoWCombatLog.txt and reassemble server-side - suppression happens
+-- strictly downstream of CLEU emission. Filter is scoped to
+-- "AscensionLogsCompanion" attribution so other addons' bugs surface
+-- normally.
+local function installTaintErrorSuppressor()
+    if H._taintErrorHandlerInstalled then return end
+    local origHandler = geterrorhandler()
+    seterrorhandler(function(msg)
+        if type(msg) == "string"
+           and msg:find("AscensionLogsCompanion", 1, true)
+           and msg:find("tainted the call", 1, true) then
+            ALC.Core.Metrics.inc("taint_errors_suppressed")
+            return
+        end
+        if origHandler then return origHandler(msg) end
+    end)
+    H._taintErrorHandlerInstalled = true
+end
+
+-- Taint popup suppressor (added 0.40.0): companion to the error-handler
+-- hook above. If cumulative taint promotes to the modal
+-- ADDON_ACTION_FORBIDDEN / ADDON_ACTION_BLOCKED dialog (rather than the
+-- yellow ScriptErrorsFrame variant), this catches it. The dialog's data
+-- arg carries the offending addon name; only auto-dismiss when it matches
+-- ours. Other addons' modals remain untouched.
+local function installTaintPopupSuppressor()
+    if not _G.StaticPopupDialogs then return end
+    for _, dlgKey in ipairs({"ADDON_ACTION_FORBIDDEN", "ADDON_ACTION_BLOCKED"}) do
+        local t = StaticPopupDialogs[dlgKey]
+        if t and not t._alc_hooked then
+            local origOnShow = t.OnShow
+            t.OnShow = function(self, data)
+                if data == "AscensionLogsCompanion" then
+                    self:Hide()
+                    ALC.Core.Metrics.inc("taint_popups_suppressed")
+                    return
+                end
+                if origOnShow then return origOnShow(self, data) end
+            end
+            t._alc_hooked = true
+        end
+    end
+end
+
 function H.start()
     installUIErrorSuppressor()
+    installTaintErrorSuppressor()
+    installTaintPopupSuppressor()
 
     ALC.RegisterEvent("PLAYER_REGEN_DISABLED", H.reevaluate)
     ALC.RegisterEvent("PLAYER_REGEN_ENABLED", function()

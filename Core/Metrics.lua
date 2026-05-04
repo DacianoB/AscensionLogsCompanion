@@ -22,6 +22,8 @@ M.counters = {
     peer_ci_deduped        = 0,
     boss_transitions       = 0,  -- new boss detected -> triggers re-inspect cycle
     max_payload_len        = 0,  -- largest chunk observed; flag if creeping up
+    taint_errors_suppressed = 0, -- 0.40.0: ScriptErrorsFrame "tainted the call" hits filtered before display
+    taint_popups_suppressed = 0, -- 0.40.0: ADDON_ACTION_FORBIDDEN/BLOCKED modal hits filtered before display
     last_flush_at          = nil,
     last_reset_at          = time(),
 }
@@ -75,6 +77,10 @@ function M.report(logger)
         .. c.inspect_timeout .. " timeout / " .. c.inspect_gate_fail .. " gate-fail")
     if c.max_payload_len > 0 then
         log("Max chunk payload observed: " .. c.max_payload_len .. " bytes")
+    end
+    if (c.taint_errors_suppressed or 0) > 0 or (c.taint_popups_suppressed or 0) > 0 then
+        log("Taint suppressed: " .. (c.taint_errors_suppressed or 0) .. " errors, "
+            .. (c.taint_popups_suppressed or 0) .. " popups")
     end
     if c.last_flush_at then
         log("Last flush: " .. (time() - c.last_flush_at) .. "s ago")
