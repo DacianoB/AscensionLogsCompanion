@@ -764,6 +764,32 @@ function I.start()
     local accum = 0
     I.ticker = ALC.frame
     I.ticker:HookScript("OnUpdate", function(self, elapsed)
+        -- Pause the auto-loop while the user has their own character pane
+        -- open. Stock 3.3.5's GameTooltip:SetInventoryItem path for the
+        -- character-pane equipped slots reads from the same single global
+        -- "last-inspected unit" buffer that NotifyInspect repoints. Once
+        -- we fire NotifyInspect on a peer, the player's own gear tooltips
+        -- render as bare slot names ("Trinket", "Legs") instead of the
+        -- full item, until the buffer is restored. Same class of
+        -- global-buffer race v0.30.10 fixed for Epoch talents; this is
+        -- the gear-tooltip side. Manual /alc inspect-now bypasses by
+        -- calling tick() directly.
+        --
+        -- Frame names differ across the supported clients:
+        --   Epoch (Kezan/Gurubashi)    : stock CharacterFrame
+        --   Ascension (Bronzebeard/WR) : custom AscensionCharacterFrame
+        --     (probed 2026-05-03 via /alcprobe find-charframe before/after
+        --      delta - only frame that newly appears when the pane opens)
+        -- Stock CharacterFrame is hidden on Ascension's modded UI, so
+        -- gating on it alone does nothing on BB. Both checks together
+        -- cover both clients with one code path.
+        --
+        -- Coverage cost: up to one interval of delay when the user closes
+        -- the pane.
+        if (CharacterFrame and CharacterFrame:IsShown())
+           or (AscensionCharacterFrame and AscensionCharacterFrame:IsShown()) then
+            return
+        end
         accum = accum + elapsed
         if accum >= interval then
             accum = 0
