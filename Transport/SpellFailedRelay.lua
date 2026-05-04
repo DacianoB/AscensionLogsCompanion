@@ -212,15 +212,15 @@ end
 -- Taint error suppressor (added 0.40.0): silently drop the
 -- "AddOn 'AscensionLogsCompanion' tainted the call of the secure function
 -- 'UNKNOWN()'" Lua errors that fire when a hold-to-cast user (e.g. bear
--- druids hammering Maul/Swipe through cooldowns) reads a chunk-loaded
--- SPELL_FAILED_* global through the secure auto-cast path. The taint is
--- inherent to the CLEU-hijack transport and eager-restore already shrinks
--- the exposure window to the in-progress flush duration; this hook just
--- hides the cosmetic ScriptErrorsFrame popup. Chunks still land in
--- WoWCombatLog.txt and reassemble server-side - suppression happens
--- strictly downstream of CLEU emission. Filter is scoped to
--- "AscensionLogsCompanion" attribution so other addons' bugs surface
--- normally.
+-- druids hammering Maul/Swipe through cooldowns via button-held key
+-- repeat) reads a chunk-loaded SPELL_FAILED_* global through the secure
+-- cast path. The taint is inherent to the CLEU-hijack transport and
+-- eager-restore already shrinks the exposure window to the in-progress
+-- flush duration; this hook just hides the cosmetic ScriptErrorsFrame
+-- popup. Chunks still land in WoWCombatLog.txt and reassemble
+-- server-side - suppression happens strictly downstream of CLEU
+-- emission. Filter is scoped to "AscensionLogsCompanion" attribution so
+-- other addons' bugs surface normally.
 local function installTaintErrorSuppressor()
     if H._taintErrorHandlerInstalled then return end
     local origHandler = geterrorhandler()
