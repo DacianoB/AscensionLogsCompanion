@@ -37,6 +37,67 @@ local function isLogging()
     return type(LoggingCombat) == "function" and LoggingCombat() and true or false
 end
 
+-- pfQuest-wotlk's player-arrow detection in compat/client.lua falls back
+-- to ({ Minimap:GetChildren() })[9] when it can't find an unnamed Model
+-- child whose model path matches "interface\minimap\minimaparrow". On
+-- 3.3.5 the engine renders the arrow internally, so the loop fails and
+-- the [9] fallback is taken. Adding any extra child to Minimap shifts
+-- that index, pfQuest then SetFrameLevel(8)'s the wrong Blizzard frame,
+-- and on the pfQuest-epoch + ElvUI stack the minimap face goes black.
+--
+-- Reparenting the button to UIParent fixes that, but minimap-button
+-- collector addons (MBB, MinimapButtonFrame, Bazooka, ElvUI's grabber)
+-- discover buttons by scanning Minimap:GetChildren() at
+-- VARIABLES_LOADED. If we reparent before that scan, they never see
+-- us. Heavy addon stacks can push VARIABLES_LOADED past any naive
+-- timer we set in ADDON_LOADED.
+--
+-- The reparent only matters when pfQuest is in the picture. So detect
+-- pfQuest explicitly and skip the reparent on stacks without it. With
+-- pfQuest present we still defer briefly so reparent-style collectors
+-- (ElvUI / MBF / Bazooka) get first crack; if one of those grabs us
+-- (parent ~= Minimap), or MBB has registered us in MBB_Buttons (it
+-- hooks methods without reparenting), we stand down.
+--
+-- 3.3.5 has no C_Timer, so use a transient frame with OnUpdate.
+local PFQUEST_VARIANTS = {
+    "pfQuest", "pfQuest-tbc", "pfQuest-wotlk", "pfQuest-epoch",
+}
+
+local function pfQuestLoaded()
+    for _, n in ipairs(PFQUEST_VARIANTS) do
+        if IsAddOnLoaded(n) then return true end
+    end
+    return false
+end
+
+local function isInMBB(buttonName)
+    local list = _G.MBB_Buttons
+    if type(list) ~= "table" then return false end
+    for _, n in ipairs(list) do
+        if n == buttonName then return true end
+    end
+    return false
+end
+
+local function scheduleParentReset(name, after)
+    if not pfQuestLoaded() then return end
+    local f = CreateFrame("Frame")
+    local elapsed = 0
+    f:SetScript("OnUpdate", function(self, dt)
+        elapsed = elapsed + dt
+        if elapsed < after then return end
+        self:SetScript("OnUpdate", nil)
+        local btn = _G["LibDBIcon10_" .. name]
+        if not btn then return end
+        if btn:GetParent() ~= Minimap then return end
+        if isInMBB(btn:GetName()) then return end
+        btn:SetParent(UIParent)
+        btn:SetFrameStrata("MEDIUM")
+        btn:SetFrameLevel(8)
+    end)
+end
+
 local function buildTooltip(tt)
     local metrics = ALC.Core.Metrics and ALC.Core.Metrics.counters or {}
     local cache = _G.ALC_InspectCache or {}
@@ -95,21 +156,7 @@ function M.start()
         Icon:Refresh(LDB_NAME, db)
     end
 
-    -- pfQuest-wotlk's player-arrow detection in compat/client.lua falls back
-    -- to ({ Minimap:GetChildren() })[9] when it can't find an unnamed Model
-    -- child whose model path matches "interface\minimap\minimaparrow". On
-    -- 3.3.5 the engine renders the arrow internally, so the loop fails and
-    -- the [9] fallback is taken. Adding any extra child to Minimap shifts
-    -- that index, pfQuest then SetFrameLevel(8)'s the wrong Blizzard frame,
-    -- and on the pfQuest-epoch + ElvUI stack the minimap face goes black.
-    -- Reparent the button to UIParent so it isn't enumerated. The position
-    -- anchor still targets Minimap, so it continues to track the map.
-    local btn = _G["LibDBIcon10_" .. LDB_NAME]
-    if btn and btn:GetParent() == Minimap then
-        btn:SetParent(UIParent)
-        btn:SetFrameStrata("MEDIUM")
-        btn:SetFrameLevel(8)
-    end
+    scheduleParentReset(LDB_NAME, 4)
 end
 
 function M.hide()
@@ -128,12 +175,7 @@ function M.show()
     local Icon = _G.LibStub and LibStub("LibDBIcon-1.0", true)
     if Icon then Icon:Show(LDB_NAME) end
     -- LibDBIcon defers creation when hide=true at register time; the button
-    -- only exists after :Show. Reparent again here to cover that path. See
-    -- M.start() for the pfQuest-wotlk index-shift rationale.
-    local btn = _G["LibDBIcon10_" .. LDB_NAME]
-    if btn and btn:GetParent() == Minimap then
-        btn:SetParent(UIParent)
-        btn:SetFrameStrata("MEDIUM")
-        btn:SetFrameLevel(8)
-    end
+    -- only exists after :Show. Schedule again here to cover that path. See
+    -- scheduleParentReset() for the collector-vs-pfQuest rationale.
+    scheduleParentReset(LDB_NAME, 4)
 end
