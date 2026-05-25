@@ -129,9 +129,11 @@ attribute it back to the right encounter - nothing else is read or sent.
 
 What's captured: gear itemstrings, vanilla talent ranks, CAO known nodes
 and ranks, mystic enchant slot map, active spec, guild and rank, race,
-class, level, gender. What's NOT captured: chat content, account info,
-UI state, anything from other addons, anything outside the inspectable
-character profile.
+class, level, gender. During logged combat, ALC also emits a low-frequency
+telemetry stream with visible player positions, health/power/target state,
+instance/map context, and hostile NPCs seen in combat-log events. What's NOT
+captured: chat content, account info, UI state, anything from other addons,
+anything outside the inspectable character profile.
 
 Inspect itself is a public protocol - anyone in your raid can see the
 same data by right-clicking and inspecting. ALC just turns thousands

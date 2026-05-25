@@ -21,6 +21,10 @@ M.counters = {
     peer_ci_received       = 0,
     peer_ci_deduped        = 0,
     boss_transitions       = 0,  -- new boss detected -> triggers re-inspect cycle
+    telemetry_snapshots_queued = 0,
+    telemetry_snapshots_skipped = 0,
+    telemetry_monsters_seen = 0,
+    telemetry_units_positioned = 0,
     max_payload_len        = 0,  -- largest chunk observed; flag if creeping up
     taint_errors_suppressed = 0, -- 0.40.0: ScriptErrorsFrame "tainted the call" hits filtered before display
     taint_popups_suppressed = 0, -- 0.40.0: ADDON_ACTION_FORBIDDEN/BLOCKED modal hits filtered before display
@@ -77,6 +81,12 @@ function M.report(logger)
         .. c.inspect_timeout .. " timeout / " .. c.inspect_gate_fail .. " gate-fail")
     if c.max_payload_len > 0 then
         log("Max chunk payload observed: " .. c.max_payload_len .. " bytes")
+    end
+    if (c.telemetry_snapshots_queued or 0) > 0 then
+        log("Telemetry: " .. (c.telemetry_snapshots_queued or 0) .. " snapshots, "
+            .. (c.telemetry_snapshots_skipped or 0) .. " skipped, "
+            .. (c.telemetry_monsters_seen or 0) .. " hostile NPCs seen, "
+            .. (c.telemetry_units_positioned or 0) .. " unit positions")
     end
     if (c.taint_errors_suppressed or 0) > 0 or (c.taint_popups_suppressed or 0) > 0 then
         log("Taint suppressed: " .. (c.taint_errors_suppressed or 0) .. " errors, "

@@ -22,6 +22,9 @@ release/
 # Local test output
 ALC_Probe_Results*.lua
 debug-*.txt
+result/
+results/
+REsult/
 
 # Never commit anything with the internal identity
 .env

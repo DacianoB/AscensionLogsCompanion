@@ -61,6 +61,8 @@ SlashCmdList["ALC"] = function(msg)
         L.info("|cff00ff00Ascension Logs Companion|r |cff888888v" .. ALC.Core.Constants.VERSION .. "|r")
         L.info("Current zone: |cffe8e8e8" .. zone .. "|r   /combatlog: " .. logging)
         L.info("Auto-log on zone entry: " .. autoOn)
+        L.info("Telemetry snapshots: " .. (cfg.telemetry_enabled and "|cff00ff00On|r" or "|cffaaaaaaOff|r")
+            .. "   Interval: |cffe8e8e8" .. tostring(ALC.Core.Constants.TELEMETRY_INTERVAL_S or 2.0) .. "s|r")
         L.info(" ")
         L.info("|cffffd200Combatant info delivery|r")
         L.info("  Snapshots delivered: |cffe8e8e8" .. (c.chunks_flushed or 0) .. "|r"
@@ -78,11 +80,50 @@ SlashCmdList["ALC"] = function(msg)
         if (c.boss_transitions or 0) > 0 then
             L.info("  Boss transitions: |cffe8e8e8" .. c.boss_transitions .. "|r")
         end
+        if (c.telemetry_snapshots_queued or 0) > 0 or (c.telemetry_snapshots_skipped or 0) > 0 then
+            L.info(" ")
+            L.info("|cffffd200Encounter telemetry|r")
+            L.info("  Snapshots queued: |cffe8e8e8" .. (c.telemetry_snapshots_queued or 0) .. "|r"
+                .. "    Skipped: |cffe8e8e8" .. (c.telemetry_snapshots_skipped or 0) .. "|r")
+            L.info("  Hostile NPCs seen: |cffe8e8e8" .. (c.telemetry_monsters_seen or 0) .. "|r"
+                .. "    Unit positions: |cffe8e8e8" .. (c.telemetry_units_positioned or 0) .. "|r")
+            if ALC.Capture.Telemetry then
+                L.info("  Last snapshot: |cffe8e8e8" .. tostring(ALC.Capture.Telemetry.lastSnapshotId or "(none)") .. "|r"
+                    .. "    Last skip: |cffe8e8e8" .. tostring(ALC.Capture.Telemetry.lastSkipReason or "(none)") .. "|r")
+            end
+        end
 
     elseif cmd == "debug" then
         _G.ALC_Config = _G.ALC_Config or {}
         ALC_Config.debug = not ALC_Config.debug
         L.info("Debug: " .. (ALC_Config.debug and "on" or "off"))
+
+    elseif cmd == "telemetry" then
+        _G.ALC_Config = _G.ALC_Config or {}
+        local sub = parts[2]
+        if sub == "on" then
+            ALC_Config.telemetry_enabled = true
+            L.info("Telemetry snapshots: on")
+        elseif sub == "off" then
+            ALC_Config.telemetry_enabled = false
+            L.info("Telemetry snapshots: off")
+        elseif sub == "now" then
+            if ALC.Capture.Telemetry and ALC.Capture.Telemetry.forceSnapshot then
+                local ok = ALC.Capture.Telemetry.forceSnapshot()
+                L.info("Telemetry snapshot: " .. (ok and "queued" or "not queued"))
+            else
+                L.warn("Telemetry module not loaded. Refresh Capture\\Telemetry.lua and AscensionLogsCompanion.toc, then /reload.")
+            end
+        elseif sub == "probe" or sub == "status" then
+            if ALC.Capture.Telemetry and ALC.Capture.Telemetry.probe then
+                ALC.Capture.Telemetry.probe(L.info)
+            else
+                L.warn("Telemetry module not loaded. Refresh Capture\\Telemetry.lua and AscensionLogsCompanion.toc, then /reload.")
+            end
+        else
+            L.info("Telemetry snapshots: " .. (ALC_Config.telemetry_enabled and "on" or "off"))
+            L.info("Usage: /alc telemetry on | off | now | probe")
+        end
 
     elseif cmd == "inspect-now" then
         ALC.Capture.InspectLoop.inspectNow("target")

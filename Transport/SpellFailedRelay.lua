@@ -35,6 +35,17 @@ H.queueIdx = 1
 H.pendingChunk = nil  -- chunk currently sitting in the rewritten globals; cleared on landed evidence
 H.globalsDirty = false  -- true when applyChunk has overwritten globals; cleared by restoreAll
 
+local function startsWithRelaySentinel(msg)
+    if type(msg) ~= "string" then return false end
+    local prefixes = C.RELAY_SENTINEL_PREFIXES or { C.CI_SENTINEL_PREFIX }
+    for _, prefix in ipairs(prefixes) do
+        if type(prefix) == "string" and msg:sub(1, #prefix) == prefix then
+            return true
+        end
+    end
+    return false
+end
+
 local function ensureOriginalsCaptured()
     if H.originals then return end
     H.originals = {}
@@ -149,10 +160,8 @@ function H.onSpellCastFailed(failedType)
     end
 
     -- Landed-evidence check: did the prior chunk make it into the log?
-    local prefix = C.CI_SENTINEL_PREFIX
     local landed = H.pendingChunk
-        and type(failedType) == "string"
-        and failedType:sub(1, #prefix) == prefix
+        and startsWithRelaySentinel(failedType)
 
     if landed then
         ALC.Core.Queue.ringAdvance(H.queue)
@@ -200,7 +209,7 @@ local function installUIErrorSuppressor()
     if UIErrorsFrame and not UIErrorsFrame._alc_hooked then
         local orig = UIErrorsFrame.AddMessage
         UIErrorsFrame.AddMessage = function(self, msg, ...)
-            if type(msg) == "string" and msg:sub(1, #C.CI_SENTINEL_PREFIX) == C.CI_SENTINEL_PREFIX then
+            if startsWithRelaySentinel(msg) then
                 return
             end
             return orig(self, msg, ...)

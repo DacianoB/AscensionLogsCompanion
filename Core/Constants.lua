@@ -7,7 +7,7 @@ local C = {}
 ALC.Core.Constants = C
 
 -- Version
-C.VERSION = "0.41.1"
+C.VERSION = "0.42.0"
 -- Bumped to 3 in 0.2.0: snapshot header gained a `server` field
 -- ("ascension" | "epoch" | "unknown") so the backend can dispatch per-server
 -- parsing for talents / mystic / vanity.
@@ -41,6 +41,16 @@ C.ADDON_PREFIX = "ALC"
 -- accepts both v1 and v2 sentinels during the rollout window.
 C.CI_SENTINEL_PREFIX = "[[ALC_CI_v2_"
 C.CI_SENTINEL_SUFFIX = "]]"
+
+-- Low-frequency encounter telemetry stream. This is intentionally separate
+-- from combatant-info snapshots so parsers can ingest movement / hostile-NPC
+-- state without treating it as a character build update.
+C.TELEMETRY_SCHEMA_VERSION = 1
+C.TELEMETRY_SENTINEL_PREFIX = "[[ALC_TS_v1_"
+C.RELAY_SENTINEL_PREFIXES = {
+    C.CI_SENTINEL_PREFIX,
+    C.TELEMETRY_SENTINEL_PREFIX,
+}
 
 -- Inspect timings
 C.INSPECT_MIN_INTERVAL_S = 1.0  -- empirically validated 2026-04-25 on Bronzebeard via /alcprobe throttle-blast 1.0: 24/24 fires got replies, 0% server-throttled. 25-man cold cycle: 48s → 24s. Legacy fallback when ALC.Profile is unset.
@@ -199,6 +209,13 @@ C.VANITY_POLL_INTERVAL_S = 1.0
 -- total drain wall-time.
 C.PEERS_PER_DEFER_FRAME = 1
 
+-- Encounter telemetry. Every snapshot is compressed/chunked through the same
+-- relay as CI data, so keep this low-frequency and bounded.
+C.TELEMETRY_INTERVAL_S = 2.0
+C.TELEMETRY_MONSTER_ACTIVE_WINDOW_S = 12.0
+C.TELEMETRY_MONSTER_PRUNE_AFTER_S = 60.0
+C.TELEMETRY_QUEUE_SKIP_AT_CHUNKS = 300
+
 -- Defaults for config
 C.DEFAULT_CONFIG = {
     debug = false,
@@ -206,6 +223,7 @@ C.DEFAULT_CONFIG = {
     broadcast_enabled = true,
     hijack_enabled = true,
     is_logger = true,
+    telemetry_enabled = true,
     silent_auto_logging = false,  -- skip both start + stop popups; logging stays on across zone changes until user manually toggles
     log_dungeons = true,          -- when off, auto-/combatlog only fires for raids (instanceType=="raid"), skipping 5-man dungeons
 }

@@ -83,6 +83,12 @@ function S.serializeCI(ci)
     return serialize(ci)
 end
 
+-- Generic payload serializer for non-CI streams that use the same
+-- AceSerializer + LibDeflate transport envelope.
+function S.serializePayload(payload)
+    return S.serializeCI(payload)
+end
+
 -- Inverse of serializeCI. Used by server-side parser; addon side rarely
 -- deserializes its own output.
 function S.deserializeCI(blob)
